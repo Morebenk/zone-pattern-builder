@@ -1,0 +1,1209 @@
+"""
+Interactive Zone Builder - Restructured Version
+===============================================
+
+Optimized workflow for zone and pattern-based extraction configuration.
+"""
+
+import streamlit as st
+import requests
+import json
+import re
+from pathlib import Path
+from PIL import Image, ImageDraw
+from typing import Dict, List, Optional, Tuple, Set
+from collections import defaultdict, Counter
+import io
+import sys
+from datetime import datetime
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Import modular components
+from zone_builder.field_formats import (
+    FIELD_FORMATS, DATE_FORMATS, HEIGHT_FORMATS, WEIGHT_FORMATS,
+    get_format_defaults, get_format_help_text,
+    get_date_pattern, get_height_pattern, get_weight_pattern,
+    auto_detect_format
+)
+from zone_builder.exporters import (
+    export_to_json, export_to_python, preview_zone_status
+)
+from zone_builder.zone_operations import (
+    calculate_aggregate_zone, extract_from_zone, extract_from_zone_multimodel,
+    get_consensus_from_models, is_in_zone
+)
+from zone_builder.ocr_utils import (
+    call_ocr_api, extract_words, draw_visualization
+)
+from zone_builder.field_normalizers import (
+    normalize_field
+)
+from zone_builder.session_manager import (
+    save_session, load_session, get_session_summary,
+    migrate_old_session, auto_save_session
+)
+from zone_builder.settings_manager import (
+    init_settings, get_setting, set_setting, render_settings_panel
+)
+
+# Page configuration
+st.set_page_config(
+    page_title="Zone Builder Pro",
+    page_icon="🎯",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Initialize settings
+init_settings()
+
+# Field definitions
+USA_FIELDS = [
+    "document_number", "license_class", "date_of_birth", "expiration_date",
+    "issue_date", "first_name", "last_name", "address", "endorsement",
+    "restrictions", "sex", "hair", "eyes", "height", "weight", "dd_code"
+]
+FRANCE_FIELDS = [
+    "document_number", "nationality", "last_name", "alternate_name",
+    "first_name", "sex", "date_of_birth", "birth_place", "height",
+    "address", "expiration_date", "issue_date", "issuing_authority"
+]
+
+# Session state initialization with robust error handling
+def init_session_state():
+    """Initialize session state with proper type checking and error recovery"""
+    defaults = {
+        'images': [],
+        'zones': {},
+        'selections': defaultdict(set),
+        'current_field': None,
+        'current_image_idx': 0,
+        'field_filter': 'All',
+        'view_mode': 'build',
+        'config_expanded': True
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+        else:
+            # Validate existing values and fix if corrupted
+            if key == 'images' and not isinstance(st.session_state[key], list):
+                st.session_state[key] = []
+            elif key == 'zones' and not isinstance(st.session_state[key], dict):
+                st.session_state[key] = {}
+            elif key == 'selections':
+                # Ensure selections is always a defaultdict
+                if not isinstance(st.session_state[key], defaultdict):
+                    if isinstance(st.session_state[key], dict):
+                        st.session_state[key] = defaultdict(set, st.session_state[key])
+                    else:
+                        st.session_state[key] = defaultdict(set)
+            elif key == 'current_image_idx' and not isinstance(st.session_state[key], int):
+                st.session_state[key] = 0
+
+init_session_state()
+
+# Minimal CSS with proper header spacing
+st.markdown("""
+<style>
+    .block-container {
+        padding-top: 4rem;
+        max-width: 100%;
+    }
+    .stButton > button {
+        white-space: nowrap;
+    }
+    div[data-testid="stExpander"] {
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+def get_filtered_fields(filter_type: str) -> List[str]:
+    """Get field list based on filter"""
+    if filter_type == "USA":
+        return USA_FIELDS
+    elif filter_type == "France":
+        return FRANCE_FIELDS
+    return list(dict.fromkeys(USA_FIELDS + FRANCE_FIELDS))  # All, remove duplicates
+
+
+def process_extraction_result(consensus_text: str, zone_config: dict, field_name: str = None) -> tuple:
+    """
+    Process extraction result: normalize, validate
+
+    NOTE: Cleanup pattern is NOT applied here - it's already applied in extract_from_zone_multimodel.
+    Applying it twice would cause incorrect results (production only applies it once).
+    """
+    # Normalize
+    field_format = zone_config.get('format', 'string')
+    format_options = {}
+    if field_format == 'date':
+        format_options['date_format'] = zone_config.get('date_format', 'MM.DD.YYYY')
+    elif field_format == 'height':
+        format_options['height_format'] = zone_config.get('height_format', 'auto')
+    elif field_format == 'weight':
+        format_options['weight_format'] = zone_config.get('weight_format', 'auto')
+
+    # Pass field_name for field-specific cleaning (name/address fields)
+    normalized_text = normalize_field(consensus_text, field_format, field_name, **format_options) if consensus_text else None
+
+    # Validate
+    pattern = zone_config.get('pattern', '')
+    is_valid = bool(re.match(pattern, normalized_text)) if pattern and normalized_text else bool(normalized_text)
+
+    return consensus_text, normalized_text, is_valid, field_format, format_options
+
+
+def render_model_outputs(model_results: dict, field_format: str, format_options: dict, pattern: str, field_name: str = None):
+    """Render per-model outputs with colorful styling"""
+    if not model_results:
+        return
+
+    st.markdown("**📊 Model Outputs:**")
+    model_colors = {
+        'parseq': '#4CAF50', 'crnn': '#2196F3', 'vitstr': '#FF9800',
+        'sar': '#9C27B0', 'viptr': '#F44336'
+    }
+
+    for model_name, model_text in sorted(model_results.items()):
+        # Display empty strings as "(no match)" for clarity
+        display_text = model_text if model_text else "(no match)"
+
+        # Model outputs get field_name for proper cleaning
+        model_normalized = normalize_field(model_text, field_format, field_name, **format_options) if model_text else None
+        model_valid = bool(re.match(pattern, model_normalized)) if pattern and model_normalized else bool(model_normalized)
+
+        status = "✅" if model_valid else "❌"
+        color = model_colors.get(model_name, '#666666')
+
+        # Create styled HTML output
+        if model_text and model_text != model_normalized and model_normalized:
+            output_html = f"""
+            <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {color}15, transparent); border-left: 3px solid {color}; border-radius: 4px;">
+                <span style="color: {color}; font-weight: bold; font-size: 14px;">
+                    {status} {model_name.upper()}:
+                </span>
+                <span style="color: #666; margin-left: 10px; font-family: monospace;">
+                    {display_text}
+                </span>
+                <span style="color: #999; margin: 0 5px;">→</span>
+                <span style="color: #333; font-weight: 500; font-family: monospace;">
+                    {model_normalized}
+                </span>
+            </div>
+            """
+        else:
+            output_html = f"""
+            <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {color}15, transparent); border-left: 3px solid {color}; border-radius: 4px;">
+                <span style="color: {color}; font-weight: bold; font-size: 14px;">
+                    {status} {model_name.upper()}:
+                </span>
+                <span style="color: #333; margin-left: 10px; font-family: monospace;">
+                    {display_text}
+                </span>
+            </div>
+            """
+        st.markdown(output_html, unsafe_allow_html=True)
+
+
+def render_per_image_expandable(img_idx: int, img_data: dict, consensus_text: str, normalized_text: str,
+                                is_valid: bool, vote_count: int, total_models: int, model_results: dict,
+                                field_format: str, format_options: dict, pattern: str, field_name: str = None,
+                                empty_msg: str = "(empty)"):
+    """Render expandable section for a single image"""
+    status_icon = "✅" if is_valid else "❌"
+    display_text = normalized_text or consensus_text or empty_msg
+
+    with st.expander(f"{status_icon} {img_data['name'][:30]}: {display_text[:30]}", expanded=(img_idx == 0)):
+        st.markdown(f"**🏆 Consensus** ({vote_count}/{total_models} models agree):")
+
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            if consensus_text != normalized_text and normalized_text:
+                st.text("Raw extracted:")
+                st.code(consensus_text or empty_msg)
+                st.text("After normalization:")
+                st.code(normalized_text)
+            else:
+                st.code(consensus_text or empty_msg)
+
+        with col2:
+            st.metric("Status", "Valid" if is_valid else "Invalid")
+
+        render_model_outputs(model_results, field_format, format_options, pattern, field_name)
+
+
+def render_header():
+    """Simplified header with mode tabs"""
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if st.button("🔨 **Build Mode**",
+                    type="primary" if st.session_state.view_mode == 'build' else "secondary",
+                    width='stretch'):
+            st.session_state.view_mode = 'build'
+            st.rerun()
+
+    with col2:
+        if st.button("🧪 **Test Mode**",
+                    type="primary" if st.session_state.view_mode == 'test' else "secondary",
+                    width='stretch'):
+            st.session_state.view_mode = 'test'
+            st.rerun()
+
+    with col3:
+        if st.button("📤 **Export Mode**",
+                    type="primary" if st.session_state.view_mode == 'export' else "secondary",
+                    width='stretch'):
+            st.session_state.view_mode = 'export'
+            st.rerun()
+
+
+def render_sidebar():
+    """Sidebar with image management and settings"""
+    with st.sidebar:
+        st.markdown("### 📁 Project Controls")
+
+        # Image management tab
+        with st.expander("📷 Image Management", expanded=True):
+            # API configuration
+            api_url = st.text_input(
+                "API URL",
+                value=get_setting('ocr', 'api_url', 'http://localhost:8080/ocr'),
+                key="ocr_api_url"
+            )
+            set_setting('ocr', 'api_url', api_url)
+
+            # File upload
+            uploaded_files = st.file_uploader(
+                "Upload images",
+                type=['jpg', 'jpeg', 'png'],
+                accept_multiple_files=True,
+                key="file_uploader"
+            )
+
+            if uploaded_files:
+                if st.button("🔍 Process", type="primary", use_container_width=True):
+                    process_images(uploaded_files, api_url)
+
+                if st.session_state.images:
+                    if st.button("🗑️ Clear", type="secondary", use_container_width=True):
+                        st.session_state.images = []
+                        st.session_state.zones = {}
+                        st.session_state.selections = defaultdict(set)
+                        st.rerun()
+
+        # Template Metadata
+        with st.expander("📄 Template Metadata", expanded=False):
+            render_template_metadata()
+
+        # Session management
+        with st.expander("💾 Session", expanded=False):
+            render_session_management()
+
+        # Settings
+        with st.expander("⚙️ Settings", expanded=False):
+            render_settings_panel()
+
+
+def process_images(uploaded_files, api_url):
+    """Process images with OCR"""
+    st.session_state.images = []
+    st.session_state.selections = defaultdict(set)
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for idx, file in enumerate(uploaded_files):
+        status_text.text(f"Processing {file.name} ({idx + 1}/{len(uploaded_files)})...")
+
+        try:
+            img_bytes = file.getvalue()
+            img = Image.open(io.BytesIO(img_bytes))
+            ocr_result = call_ocr_api(img_bytes, file.name, api_url)
+
+            if ocr_result:
+                words = extract_words(ocr_result)
+                st.session_state.images.append({
+                    'name': file.name,
+                    'image': img,
+                    'ocr_result': ocr_result,
+                    'words': words
+                })
+
+        except Exception as e:
+            st.error(f"Error processing {file.name}: {str(e)}")
+
+        progress_bar.progress((idx + 1) / len(uploaded_files))
+
+    status_text.empty()
+    progress_bar.empty()
+
+    if st.session_state.images:
+        st.success(f"✅ Processed {len(st.session_state.images)} images")
+        st.rerun()
+
+
+def render_template_metadata():
+    """Render template metadata configuration"""
+    # Initialize metadata in session state if not present
+    if 'metadata' not in st.session_state:
+        st.session_state.metadata = {
+            'template_name': 'my_template',
+            'class_name': 'MyTemplate',
+            'document_type': 'Driver License',
+            'region': 'USA',
+            'version': '1.0',
+            'description': 'Auto-generated template from Zone Builder'
+        }
+
+    # Force widget keys to match metadata values (ensures loaded values appear)
+    # This runs every render to keep widgets synced with metadata
+    st.session_state['metadata_template_name'] = st.session_state.metadata.get('template_name', 'my_template')
+    st.session_state['metadata_class_name'] = st.session_state.metadata.get('class_name', 'MyTemplate')
+    st.session_state['metadata_region'] = st.session_state.metadata.get('region', 'USA')
+    st.session_state['metadata_version'] = st.session_state.metadata.get('version', '1.0')
+    st.session_state['metadata_description'] = st.session_state.metadata.get('description', 'Auto-generated template from Zone Builder')
+
+    # For selectbox, we need to store the index
+    doc_types = ["Driver License", "ID Card", "Passport", "Other"]
+    doc_type_value = st.session_state.metadata.get('document_type', 'Driver License')
+    st.session_state['metadata_document_type_idx'] = doc_types.index(doc_type_value) if doc_type_value in doc_types else 0
+
+    template_name = st.text_input(
+        "Template Name",
+        help="Used for file naming (e.g., 'texas_dl_front')",
+        placeholder="e.g., texas_dl_front",
+        key="metadata_template_name"
+    )
+    st.session_state.metadata['template_name'] = template_name
+
+    class_name = st.text_input(
+        "Class Name",
+        help="Python class name for code generation (e.g., 'TexasDLFront')",
+        placeholder="e.g., TexasDLFront",
+        key="metadata_class_name"
+    )
+    st.session_state.metadata['class_name'] = class_name
+
+    document_type = st.selectbox(
+        "Document Type",
+        doc_types,
+        index=st.session_state.get('metadata_document_type_idx', 0),
+        help="Type of document this template is for"
+    )
+    st.session_state.metadata['document_type'] = document_type
+
+    region = st.text_input(
+        "Region",
+        help="Country or state (e.g., 'USA/Texas', 'France')",
+        placeholder="e.g., USA/Texas",
+        key="metadata_region"
+    )
+    st.session_state.metadata['region'] = region
+
+    version = st.text_input(
+        "Version",
+        help="Template version for tracking changes",
+        placeholder="e.g., 1.0",
+        key="metadata_version"
+    )
+    st.session_state.metadata['version'] = version
+
+    description = st.text_area(
+        "Description",
+        help="Brief description of what this template extracts",
+        placeholder="e.g., Field extraction for Texas Driver License - Front side",
+        key="metadata_description",
+        height=80
+    )
+    st.session_state.metadata['description'] = description
+
+
+def render_session_management():
+    """Compact session management"""
+    if st.session_state.images or st.session_state.zones:
+        # Create session bytes
+        session_bytes = save_session(st.session_state)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Get template name from metadata
+        template_name = st.session_state.metadata.get('template_name', 'template') if hasattr(st.session_state, 'metadata') else 'template'
+
+        st.download_button(
+            "💾 Download Session",
+            data=session_bytes,
+            file_name=f"{template_name}_{timestamp}.json.gz",
+            mime="application/octet-stream",
+            use_container_width=True,
+            help="Download session with all images, OCR results, and zone configurations"
+        )
+
+    uploaded_session = st.file_uploader(
+        "Load session",
+        type=['json', 'gz'],
+        key="session_loader"
+    )
+
+    if uploaded_session:
+        if st.button("📥 Load", type="primary", width='stretch'):
+            try:
+                session_data = load_session(uploaded_session.getvalue())
+                if session_data:
+                    st.session_state.update(session_data)
+                    # Metadata widget syncing happens automatically in render_template_metadata()
+                    st.success("✅ Session loaded")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+
+
+def render_build_mode():
+    """Main build interface with improved organization"""
+    if not st.session_state.images:
+        render_welcome_screen()
+        return
+
+    # Step 1: Field and Image Selection (collapsible)
+    with st.expander("📋 **Step 1: Field & Image Selection**",
+                     expanded=st.session_state.config_expanded):
+        render_field_and_image_selector()
+
+    # Only show zone configuration if a field is selected
+    if st.session_state.current_field:
+        # Step 2: Zone Configuration
+        st.markdown("### 🎯 Zone Configuration")
+
+        # Get or create zone config
+        if st.session_state.current_field in st.session_state.zones:
+            zone_config = st.session_state.zones[st.session_state.current_field].copy()
+            editing_mode = True
+            st.info(f"📝 Editing: **{st.session_state.current_field}**")
+        else:
+            zone_config = calculate_aggregate_zone(
+                st.session_state.images,
+                st.session_state.selections
+            )
+            editing_mode = False
+
+            # Auto-detect format based on field name
+            auto_format = auto_detect_format(st.session_state.current_field)
+            if not zone_config:
+                zone_config = {'y_range': (0, 1), 'x_range': (0, 1)}
+            zone_config['format'] = auto_format
+
+            # Set format-specific defaults
+            if auto_format == 'date':
+                zone_config['date_format'] = 'MM.DD.YYYY'
+            elif auto_format == 'height':
+                zone_config['height_format'] = 'us'
+            elif auto_format == 'weight':
+                zone_config['weight_format'] = 'us'
+
+            if zone_config.get('y_range') != (0, 1):
+                st.success(f"✨ Auto-calculated zone from selections (format: {auto_format})")
+            else:
+                st.warning("Select words on the image to create a zone")
+
+        # Format configuration
+        col1, col2 = st.columns(2)
+        with col1:
+            field_format = st.selectbox(
+                "Data Format",
+                FIELD_FORMATS,
+                index=FIELD_FORMATS.index(zone_config.get('format', 'string')),
+                key=f"format_selector_{st.session_state.current_field}"
+            )
+            zone_config['format'] = field_format
+
+        with col2:
+            # Format-specific options
+            if field_format == 'date':
+                date_format = st.selectbox(
+                    "Date Format",
+                    DATE_FORMATS,
+                    index=DATE_FORMATS.index(zone_config.get('date_format', 'MM.DD.YYYY')),
+                    key=f"date_format_selector_{st.session_state.current_field}"
+                )
+                zone_config['date_format'] = date_format
+                zone_config['pattern'] = get_date_pattern(date_format)
+
+            elif field_format == 'height':
+                height_format = st.selectbox(
+                    "Height Format",
+                    HEIGHT_FORMATS,
+                    index=HEIGHT_FORMATS.index(zone_config.get('height_format', 'us')),
+                    key=f"height_format_selector_{st.session_state.current_field}"
+                )
+                zone_config['height_format'] = height_format
+                zone_config['pattern'] = get_height_pattern(height_format)
+
+            elif field_format == 'weight':
+                weight_format = st.selectbox(
+                    "Weight Format",
+                    WEIGHT_FORMATS,
+                    index=WEIGHT_FORMATS.index(zone_config.get('weight_format', 'us')),
+                    key=f"weight_format_selector_{st.session_state.current_field}"
+                )
+                zone_config['weight_format'] = weight_format
+                zone_config['pattern'] = get_weight_pattern(weight_format)
+
+            elif field_format == 'sex':
+                zone_config['pattern'] = r'^[MF]$'
+                st.info("Pattern: ^[MF]$")
+
+            elif field_format == 'eyes':
+                zone_config['pattern'] = r'^[A-Z]{2,6}$'
+                st.info("Pattern: ^[A-Z]{2,6}$ (extracts as-is)")
+
+        # Common patterns (shared by both extraction methods)
+        st.divider()
+        st.markdown("### 🔧 Common Extraction Patterns")
+        st.caption("These patterns are used by both zone-based and pattern-based extraction")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            cleanup_pattern = st.text_input(
+                "Cleanup Pattern",
+                value=zone_config.get('cleanup_pattern', ''),
+                placeholder="e.g., ^.*?:\\s*",
+                help="Removes unwanted text (labels, prefixes)"
+            )
+            zone_config['cleanup_pattern'] = cleanup_pattern
+
+        with col2:
+            if field_format in ['string', 'number']:
+                validation_pattern = st.text_input(
+                    "Validation Pattern",
+                    value=zone_config.get('pattern', ''),
+                    placeholder="e.g., ^\\d{8}$",
+                    help="Validates the final extracted value"
+                )
+                zone_config['pattern'] = validation_pattern
+
+        # Zone-based extraction section
+        st.divider()
+        st.markdown("### 📦 Zone-Based Extraction")
+        render_zone_extraction_section(zone_config, st.session_state.current_field)
+
+        # Pattern-based fallback section
+        st.divider()
+        st.markdown("### 🔄 Pattern-Based Fallback")
+        st.caption("Used when zone extraction fails (searches expanded zone +5%)")
+        render_pattern_extraction_section(zone_config, st.session_state.current_field)
+
+        # Save/Delete buttons
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button("💾 Save Configuration", type="primary", width='stretch'):
+                st.session_state.zones[st.session_state.current_field] = zone_config
+                st.success(f"✅ Saved: {st.session_state.current_field}")
+                st.session_state.selections = defaultdict(set)
+                st.rerun()
+
+        with col2:
+            if editing_mode:
+                if st.button("🔄 Reset", type="secondary", width='stretch'):
+                    st.session_state.selections = defaultdict(set)
+                    st.rerun()
+
+        with col3:
+            if editing_mode:
+                if st.button("🗑️ Delete", type="secondary", width='stretch'):
+                    del st.session_state.zones[st.session_state.current_field]
+                    st.session_state.current_field = None
+                    st.warning(f"Deleted configuration")
+                    st.rerun()
+
+
+def render_field_and_image_selector():
+    """Combined field and image selection interface"""
+    col1, col2 = st.columns([2, 1])  # Swapped: image on left (2), field on right (1)
+
+    with col2:  # Field selection now on the right
+        # Field selection
+        st.markdown("#### Select Field")
+
+        # Region filter
+        region = st.selectbox(
+            "Region",
+            ["All", "USA", "France"],
+            index=["All", "USA", "France"].index(st.session_state.field_filter)
+        )
+        if region != st.session_state.field_filter:
+            st.session_state.field_filter = region
+            st.rerun()
+
+        # Field dropdown
+        fields = get_filtered_fields(st.session_state.field_filter)
+        created_fields = [f for f in fields if f in st.session_state.zones]
+        available_fields = [f for f in fields if f not in st.session_state.zones]
+
+        options = []
+        if created_fields:
+            options.append("── Configured ──")
+            options.extend([f"✅ {f}" for f in created_fields])
+        if available_fields:
+            if created_fields:
+                options.append("── Available ──")
+            options.extend(available_fields)
+
+        if options:
+            field_selection = st.selectbox(
+                "Field",
+                options,
+                key="field_dropdown"
+            )
+
+            if field_selection and not field_selection.startswith("──"):
+                field_name = field_selection.replace("✅ ", "") if field_selection.startswith("✅") else field_selection
+                if field_name != st.session_state.current_field:
+                    st.session_state.current_field = field_name
+                    if field_name not in st.session_state.zones:
+                        st.session_state.selections = defaultdict(set)
+                    st.session_state.config_expanded = False
+                    st.rerun()
+
+        # Zone coordinates editor (if field is selected and zone exists)
+        if st.session_state.current_field and st.session_state.current_field in st.session_state.zones:
+            st.markdown("---")
+            st.markdown("#### Zone Coordinates")
+
+            zone_config = st.session_state.zones[st.session_state.current_field]
+
+            # Store auto-calculated zone if not already stored
+            auto_zones_key = f"_auto_zone_{st.session_state.current_field}"
+            if auto_zones_key not in st.session_state:
+                # Calculate and store the auto zone
+                auto_zone = calculate_aggregate_zone(
+                    st.session_state.images,
+                    st.session_state.selections
+                )
+                if auto_zone:
+                    st.session_state[auto_zones_key] = auto_zone.copy()
+
+            # Y Range
+            y_min = st.number_input(
+                "Y Min",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(zone_config['y_range'][0]),
+                step=0.01,
+                format="%.3f",
+                key=f"y_min_{st.session_state.current_field}"
+            )
+            y_max = st.number_input(
+                "Y Max",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(zone_config['y_range'][1]),
+                step=0.01,
+                format="%.3f",
+                key=f"y_max_{st.session_state.current_field}"
+            )
+
+            # X Range
+            x_min = st.number_input(
+                "X Min",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(zone_config.get('x_range', (0, 1))[0]),
+                step=0.01,
+                format="%.3f",
+                key=f"x_min_{st.session_state.current_field}"
+            )
+            x_max = st.number_input(
+                "X Max",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(zone_config.get('x_range', (0, 1))[1]),
+                step=0.01,
+                format="%.3f",
+                key=f"x_max_{st.session_state.current_field}"
+            )
+
+            # Update zone config if values changed
+            if (y_min, y_max) != zone_config['y_range'] or (x_min, x_max) != zone_config.get('x_range', (0, 1)):
+                zone_config['y_range'] = (y_min, y_max)
+                zone_config['x_range'] = (x_min, x_max)
+                st.session_state.zones[st.session_state.current_field] = zone_config
+                st.rerun()
+
+            # Reset to auto-calculated button
+            if auto_zones_key in st.session_state:
+                if st.button("🔄 Reset to Auto", use_container_width=True, help="Restore auto-calculated zone from selections"):
+                    auto_zone = st.session_state[auto_zones_key]
+                    zone_config['y_range'] = auto_zone['y_range']
+                    zone_config['x_range'] = auto_zone.get('x_range', (0, 1))
+                    st.session_state.zones[st.session_state.current_field] = zone_config
+                    st.rerun()
+
+        st.markdown("---")
+        # Progress
+        st.metric("Progress", f"{len(st.session_state.zones)}/{len(fields)} fields")
+
+    with col1:  # Image section now on the left
+        # Image viewer and word selection
+        st.markdown("#### Image & Word Selection")
+
+        # Image navigation
+        image_options = [f"{i+1}. {img['name'][:30]}" for i, img in enumerate(st.session_state.images)]
+
+        col_nav1, col_nav2 = st.columns([3, 1])
+        with col_nav1:
+            selected = st.selectbox(
+                "Current Image",
+                options=range(len(image_options)),
+                format_func=lambda x: image_options[x],
+                index=st.session_state.current_image_idx
+            )
+            if selected != st.session_state.current_image_idx:
+                st.session_state.current_image_idx = selected
+                st.rerun()
+
+        with col_nav2:
+            st.metric("Image", f"{st.session_state.current_image_idx + 1}/{len(st.session_state.images)}", label_visibility="collapsed")
+
+        # Display image
+        current_img = st.session_state.images[st.session_state.current_image_idx]
+        current_selections = st.session_state.selections[st.session_state.current_image_idx]
+
+        vis_img = draw_visualization(
+            current_img['image'],
+            current_img['words'],
+            current_selections,
+            st.session_state.zones,
+            st.session_state.current_field
+        )
+
+        # Image display with scale
+        image_scale = get_setting('display', 'image_scale', 1.0)
+        if image_scale < 1.0:
+            col_width = int(12 * image_scale)
+            col1, col2 = st.columns([col_width, 12 - col_width])
+            with col1:
+                st.image(vis_img, width='stretch')
+        else:
+            st.image(vis_img, width='stretch')
+
+        # Word selection tools
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            if st.button("Select All"):
+                current_selections.update(range(len(current_img['words'])))
+                st.rerun()
+        with col2:
+            if st.button("Clear"):
+                current_selections.clear()
+                st.rerun()
+        with col3:
+            if st.button("Invert"):
+                all_indices = set(range(len(current_img['words'])))
+                current_selections.symmetric_difference_update(all_indices)
+                st.rerun()
+        with col4:
+            st.info(f"Selected: {len(current_selections)}")
+
+        # Word buttons
+        words = current_img['words']
+        cols_per_row = 10  # 10 numbers per line as requested
+        for row_start in range(0, len(words), cols_per_row):
+            row_end = min(row_start + cols_per_row, len(words))
+            cols = st.columns(cols_per_row)
+
+            for i in range(row_start, row_end):
+                col_idx = i - row_start
+                word = words[i]
+                is_selected = i in current_selections
+
+                with cols[col_idx]:
+                    if st.button(
+                        str(i+1),
+                        key=f"word_{st.session_state.current_image_idx}_{i}",
+                        type="primary" if is_selected else "secondary",
+                        help=f"'{word['text']}'"
+                    ):
+                        if is_selected:
+                            current_selections.remove(i)
+                        else:
+                            current_selections.add(i)
+                        st.rerun()
+
+
+def render_zone_extraction_section(zone_config, field_name: str = None):
+    """Zone-based extraction preview with detailed expandables"""
+
+    # Copy all raw outputs button
+    all_raw_outputs = []
+    for img_data in st.session_state.images:
+        model_results = extract_from_zone_multimodel(
+            img_data.get('ocr_result', {}),
+            zone_config,
+            img_data.get('words', [])
+        )
+        if model_results:
+            all_raw_outputs.extend(model_results.values())
+
+    if all_raw_outputs:
+        with st.expander(f"📋 Copy All Zone Outputs ({len(all_raw_outputs)} samples)", expanded=False):
+            st.code('\n'.join(all_raw_outputs), language="text")
+
+    # Preview for each image with expandable details
+    for img_idx, img_data in enumerate(st.session_state.images):
+        model_results = extract_from_zone_multimodel(
+            img_data.get('ocr_result', {}), zone_config, img_data.get('words', [])
+        )
+
+        # Calculate consensus
+        if model_results:
+            vote_counts = Counter(model_results.values())
+            consensus_text = vote_counts.most_common(1)[0][0] if vote_counts else ""
+            vote_count = vote_counts[consensus_text] if consensus_text else 0
+            total_models = len(model_results)
+        else:
+            consensus_text = extract_from_zone(img_data['words'], zone_config)
+            vote_count, total_models = 1, 1
+
+        # Process result: normalize, validate (cleanup already applied in extraction)
+        consensus_text, normalized_text, is_valid, field_format, format_options = process_extraction_result(
+            consensus_text, zone_config, field_name
+        )
+
+        # Render expandable for this image
+        render_per_image_expandable(
+            img_idx, img_data, consensus_text, normalized_text, is_valid,
+            vote_count, total_models, model_results, field_format, format_options,
+            zone_config.get('pattern', ''), field_name
+        )
+
+
+def render_pattern_extraction_section(zone_config, field_name: str = None):
+    """Pattern-based extraction configuration and preview"""
+
+    # Get expanded zone bounds
+    y_range = zone_config.get('y_range', (0, 1))
+    x_range = zone_config.get('x_range', (0, 1))
+
+    expand_factor = 0.05
+    expanded_y = (max(0, y_range[0] - expand_factor), min(1, y_range[1] + expand_factor))
+    expanded_x = (max(0, x_range[0] - expand_factor), min(1, x_range[1] + expand_factor))
+
+    # Consensus pattern input with immediate application
+    consensus_pattern = st.text_input(
+        "Consensus Extract Pattern (press Enter to apply)",
+        value=zone_config.get('consensus_extract', ''),
+        placeholder="e.g., (?:ID|1D|10)[:\\s]*(\\d{8}) - Use capture group () to extract",
+        help="Regex pattern that searches each MODEL's expanded zone (+5%) first, then full document as fallback"
+    )
+    zone_config['consensus_extract'] = consensus_pattern
+
+    # Validate consensus pattern
+    if consensus_pattern:
+        from zone_operations import validate_consensus_pattern
+        is_valid, error_msg = validate_consensus_pattern(consensus_pattern)
+        if not is_valid:
+            st.error(f"⚠️ **Invalid Pattern:** {error_msg}")
+        else:
+            # Check if pattern has capturing group
+            compiled = re.compile(consensus_pattern)
+            if compiled.groups >= 1:
+                st.success("✓ Pattern with capturing group - extracts group(1)")
+            else:
+                st.info("ℹ️ Pattern without capturing group - extracts full match + cleanup_pattern")
+
+    # Cleanup toggle
+    apply_cleanup = st.checkbox(
+        "Apply cleanup pattern to extracted value",
+        value=False,
+        key=f"apply_cleanup_{field_name}",
+        help="Apply cleanup pattern to the value extracted by consensus pattern (e.g., remove remaining labels)"
+    )
+
+    # Prepare expanded zone config WITHOUT cleanup
+    # (Consensus patterns search raw text, cleanup is applied to extracted value)
+    expanded_zone_config = zone_config.copy()
+    expanded_zone_config['y_range'] = expanded_y
+    expanded_zone_config['x_range'] = expanded_x
+    expanded_zone_config['cleanup_pattern'] = ''  # Never apply cleanup to zone text for consensus extraction
+
+    # Decide what to show based on whether pattern is entered
+    if not consensus_pattern:
+        # NO PATTERN: Show expanded zone outputs for pattern development
+        st.info("💡 Enter a consensus pattern above to test extraction. The outputs below show the expanded zone (+5%) text from each model to help you develop your pattern.")
+
+        all_expanded_outputs = []
+        for img_data in st.session_state.images:
+            model_results = extract_from_zone_multimodel(
+                img_data.get('ocr_result', {}),
+                expanded_zone_config,
+                img_data.get('words', [])
+            )
+            if model_results:
+                all_expanded_outputs.extend(model_results.values())
+
+        if all_expanded_outputs:
+            with st.expander(f"📋 Copy All Expanded Zone Outputs ({len(all_expanded_outputs)} samples)", expanded=False):
+                st.code('\n'.join(all_expanded_outputs), language="text")
+
+        # Per-image expandables showing expanded zone content
+        for img_idx, img_data in enumerate(st.session_state.images):
+            model_results = extract_from_zone_multimodel(
+                img_data.get('ocr_result', {}), expanded_zone_config, img_data.get('words', [])
+            )
+
+            # Calculate consensus
+            if model_results:
+                vote_counts = Counter(model_results.values())
+                consensus_text = vote_counts.most_common(1)[0][0] if vote_counts else ""
+                vote_count = vote_counts[consensus_text] if consensus_text else 0
+                total_models = len(model_results)
+            else:
+                consensus_text = extract_from_zone(img_data['words'], expanded_zone_config)
+                vote_count, total_models = 1, 1
+
+            # Process result: normalize, validate (cleanup already applied in extraction)
+            consensus_text, normalized_text, is_valid, field_format, format_options = process_extraction_result(
+                consensus_text, zone_config, field_name
+            )
+
+            # Render expandable for this image
+            render_per_image_expandable(
+                img_idx, img_data, consensus_text, normalized_text, is_valid,
+                vote_count, total_models, model_results, field_format, format_options,
+                zone_config.get('pattern', ''), field_name
+            )
+    else:
+        # PATTERN ENTERED: Test pattern and show results
+        try:
+            compiled_pattern = re.compile(consensus_pattern, re.IGNORECASE | re.MULTILINE)
+        except re.error as e:
+            st.error(f"❌ Invalid regex: {e}")
+            return
+
+        st.success(f"✅ Testing pattern on each model's expanded zone (+5%) and full document")
+
+        # Get cleanup pattern if toggle is enabled
+        cleanup_pattern = zone_config.get('cleanup_pattern', '') if apply_cleanup else ''
+
+        # Helper function to test pattern on text and apply cleanup to result
+        def test_pattern_on_text(zone_text, full_text):
+            """Test pattern on zone text first, fallback to full text, then apply cleanup to extracted value"""
+            extracted_value = None
+
+            # Try expanded zone text first
+            if zone_text:
+                match = compiled_pattern.search(zone_text)
+                if match:
+                    extracted_value = match.group(1) if match.groups() else match.group(0)
+
+            # Fallback to full document text
+            if not extracted_value and full_text:
+                match = compiled_pattern.search(full_text)
+                if match:
+                    extracted_value = match.group(1) if match.groups() else match.group(0)
+
+            # Apply cleanup pattern to the extracted value (if enabled and pattern exists)
+            if extracted_value and cleanup_pattern:
+                try:
+                    extracted_value = re.sub(cleanup_pattern, '', extracted_value, flags=re.IGNORECASE).strip()
+                except re.error:
+                    pass  # If cleanup pattern is invalid, skip it
+
+            return extracted_value
+
+        # Process all images once and cache results
+        all_image_results = []
+
+        for img_idx, img_data in enumerate(st.session_state.images):
+            ocr_result = img_data.get('ocr_result', {})
+            per_model_outputs = ocr_result.get('model_comparison', {}).get('per_model_outputs', {})
+
+            # Get expanded zone text for pattern testing (only once per image)
+            model_expanded_zone_results = extract_from_zone_multimodel(
+                ocr_result, expanded_zone_config, img_data.get('words', [])
+            )
+
+            # Test pattern on each model - Get model names dynamically from the data
+            model_results = {}
+
+            # Get actual model names from per_model_outputs (don't hardcode!)
+            available_models = list(per_model_outputs.keys()) if per_model_outputs else []
+
+            for model_name in available_models:
+                zone_text = model_expanded_zone_results.get(model_name, '')
+                model_data = per_model_outputs.get(model_name, {})
+
+                # Get full document text by joining all words
+                model_words = model_data.get('words', []) if model_data else []
+                full_text = ' '.join(model_words) if model_words else ''
+
+                model_match = test_pattern_on_text(zone_text, full_text)
+                model_results[model_name] = model_match if model_match else ''
+
+            # Calculate consensus
+            non_empty_results = {k: v for k, v in model_results.items() if v}
+            if non_empty_results:
+                vote_counts = Counter(non_empty_results.values())
+                consensus_match = vote_counts.most_common(1)[0][0]
+                vote_count = vote_counts[consensus_match]
+            else:
+                consensus_match, vote_count = None, 0
+
+            # Store results for this image
+            all_image_results.append({
+                'img_idx': img_idx,
+                'img_data': img_data,
+                'model_results': model_results,
+                'consensus_match': consensus_match,
+                'vote_count': vote_count,
+                'total_models': len(model_results)
+            })
+
+        # Copy all pattern outputs button
+        all_pattern_outputs = []
+        for img_result in all_image_results:
+            for model_name in sorted(img_result['model_results'].keys()):
+                match_value = img_result['model_results'].get(model_name, '')
+                all_pattern_outputs.append(match_value if match_value else '(no match)')
+
+        with st.expander(f"📋 Copy All Pattern Outputs ({len(all_pattern_outputs)} samples)", expanded=False):
+            st.code('\n'.join(all_pattern_outputs), language="text")
+
+        # Per-image expandables using cached results
+        for img_result in all_image_results:
+            # Process result: normalize, validate
+            cleaned, normalized, is_valid, field_format, format_options = process_extraction_result(
+                img_result['consensus_match'] or '', zone_config, field_name
+            )
+
+            # Render expandable for this image
+            render_per_image_expandable(
+                img_result['img_idx'], img_result['img_data'], cleaned, normalized, is_valid,
+                img_result['vote_count'], img_result['total_models'], img_result['model_results'],
+                field_format, format_options, zone_config.get('pattern', ''), field_name, empty_msg='(no match)'
+            )
+
+
+def render_test_mode():
+    """Test mode for validation"""
+    st.markdown("### 🧪 Zone Testing & Validation")
+
+    if not st.session_state.zones:
+        st.info("No zones created yet. Switch to Build mode to create zones.")
+        return
+
+    # Test all zones
+    for field_name, zone_config in st.session_state.zones.items():
+        success_count = 0
+        total_count = len(st.session_state.images)
+
+        for img_data in st.session_state.images:
+            # Test zone extraction
+            extracted = extract_from_zone(img_data['words'], zone_config)
+            if extracted:
+                success_count += 1
+
+        success_rate = (success_count / total_count * 100) if total_count > 0 else 0
+        status = "🟢" if success_rate >= 90 else "🟡" if success_rate >= 70 else "🔴"
+
+        st.text(f"{status} {field_name}: {success_rate:.0f}% success ({success_count}/{total_count})")
+
+
+def render_export_mode():
+    """Export mode"""
+    st.markdown("### 📤 Export Configuration")
+
+    if not st.session_state.zones:
+        st.info("No zones to export. Create zones in Build mode first.")
+        return
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.metric("Total Zones", len(st.session_state.zones))
+        for field_name in st.session_state.zones:
+            st.text(f"• {field_name}")
+
+    with col2:
+        # Get metadata from session state (configured in sidebar)
+        metadata = st.session_state.get('metadata', {
+            'template_name': 'my_template',
+            'class_name': 'CustomTemplate',
+            'document_type': 'Driver License',
+            'region': 'USA',
+            'version': '1.0',
+            'description': 'Auto-generated template'
+        })
+
+        # Show current metadata
+        st.info(f"**Using metadata from sidebar:**\n\n"
+                f"Template: `{metadata.get('template_name', 'N/A')}`\n\n"
+                f"Class: `{metadata.get('class_name', 'N/A')}`\n\n"
+                f"Document: `{metadata.get('document_type', 'N/A')}`\n\n"
+                f"Region: `{metadata.get('region', 'N/A')}`\n\n"
+                f"Version: `{metadata.get('version', 'N/A')}`\n\n"
+                f"Description: _{metadata.get('description', 'N/A')}_")
+
+        export_format = st.radio("Format", ["JSON", "Python"])
+
+        if export_format == "JSON":
+            zones_json = export_to_json(st.session_state.zones)
+            template_name = metadata.get('template_name', 'zones')
+            st.download_button(
+                "📥 Download JSON",
+                data=zones_json,
+                file_name=f"{template_name}.json",
+                mime="application/json",
+                width='stretch'
+            )
+        else:
+            python_code = export_to_python(st.session_state.zones, metadata)
+            template_name = metadata.get('template_name', 'template')
+            st.download_button(
+                "📥 Download Python",
+                data=python_code,
+                file_name=f"{template_name}.py",
+                mime="text/plain",
+                width='stretch'
+            )
+
+
+def render_welcome_screen():
+    """Welcome screen"""
+    st.markdown("""
+    ### 👋 Welcome to Zone Builder Pro
+
+    **Getting Started:**
+    1. Upload document images in the sidebar
+    2. Process with OCR
+    3. Select field and create zones
+    4. Configure extraction patterns
+    5. Export your template
+
+    **Upload images in the sidebar to begin →**
+    """)
+
+
+def main():
+    """Main application"""
+    render_header()
+    render_sidebar()
+
+    if st.session_state.view_mode == 'build':
+        render_build_mode()
+    elif st.session_state.view_mode == 'test':
+        render_test_mode()
+    elif st.session_state.view_mode == 'export':
+        render_export_mode()
+
+
+if __name__ == "__main__":
+    main()
