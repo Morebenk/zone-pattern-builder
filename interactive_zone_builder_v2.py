@@ -1192,6 +1192,542 @@ def render_welcome_screen():
     """)
 
 
+
+
+
+def render_test_mode():
+    """Test mode - comprehensive field extraction testing"""
+    st.markdown("### 🧪 Test Mode - Field Extraction Validation")
+    
+    if not st.session_state.zones:
+        st.warning("⚠️ No zones configured yet. Switch to Build Mode to create zones first.")
+        if st.button("🔨 Go to Build Mode"):
+            st.session_state.view_mode = 'build'
+            st.rerun()
+        return
+
+    # Test images upload section
+    st.markdown("#### 📷 Upload Test Images")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        test_files = st.file_uploader(
+            "Upload test images to validate your template",
+            type=['jpg', 'jpeg', 'png'],
+            accept_multiple_files=True,
+            key="test_file_uploader"
+        )
+    
+    with col2:
+        # API URL for testing
+        test_api_url = st.text_input(
+            "OCR API URL",
+            value=get_setting('ocr', 'api_url', 'http://localhost:8080/ocr'),
+            key="test_api_url"
+        )
+
+    if test_files:
+        if st.button("🔍 Process Test Images & Extract Fields", type="primary"):
+            process_test_images_and_extract(test_files, test_api_url)
+    
+    # Display test results if available
+    if hasattr(st.session_state, 'test_results') and st.session_state.test_results:
+        render_test_results()
+
+
+def render_export_mode():
+    """Export mode - template export interface"""
+    st.markdown("### 📤 Export Template")
+    
+    if not st.session_state.zones:
+        st.warning("⚠️ No zones configured yet. Switch to Build Mode to create zones first.")
+        if st.button("🔨 Go to Build Mode"):
+            st.session_state.view_mode = 'build'
+            st.rerun()
+        return
+
+    # Export preview
+    st.markdown("#### 📋 Zone Configuration Preview")
+    
+    preview_data = preview_zone_status(st.session_state.zones)
+    
+    if preview_data:
+        # Summary stats
+        total_zones = len(preview_data)
+        configured_zones = len([p for p in preview_data if p['status'] == '✅'])
+        partial_zones = len([p for p in preview_data if p['status'] == '⚠️'])
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Zones", total_zones)
+        with col2:
+            st.metric("Fully Configured", configured_zones)
+        with col3:
+            st.metric("Partially Configured", partial_zones)
+        
+        # Zone status table
+        for preview in preview_data:
+            with st.expander(f"{preview['status']} {preview['field_name']} - {preview['message']}", expanded=False):
+                st.markdown(f"**Zone:** y_range: {preview['y_range']}, x_range: {preview['x_range']}")
+                if preview.get('patterns'):
+                    st.markdown("**Patterns configured:**")
+                    for pattern_type, pattern in preview['patterns'].items():
+                        st.code(f"{pattern_type}: {pattern}")
+
+    # Template metadata configuration
+    st.markdown("#### 📄 Template Metadata")
+    
+    metadata = {}
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        metadata['template_name'] = st.text_input(
+            "Template Name",
+            value=get_setting('export', 'template_name', 'custom_template'),
+            help="Used for class name and file name"
+        )
+        metadata['document_type'] = st.text_input(
+            "Document Type",
+            value=metadata['template_name'],
+            help="Document type identifier"
+        )
+        metadata['region'] = st.text_input(
+            "Region",
+            value=get_setting('export', 'region', 'USA'),
+            help="Geographic region (USA, France, etc.)"
+        )
+    
+    with col2:
+        metadata['version'] = st.text_input(
+            "Version",
+            value=get_setting('export', 'version', '1.0'),
+            help="Template version"
+        )
+        metadata['author'] = st.text_input(
+            "Author",
+            value=get_setting('export', 'author', 'Zone Builder'),
+            help="Template author"
+        )
+
+    # Export section
+    st.markdown("#### 💾 Export Options")
+    
+    export_format = st.radio(
+        "Export Format",
+        ["JSON", "Python Template"],
+        horizontal=True
+    )
+    
+    if export_format == "JSON":
+        zones_json = export_to_json(st.session_state.zones)
+        st.code(zones_json, language="json", line_numbers=True)
+        
+        st.download_button(
+            "📥 Download JSON",
+            data=zones_json,
+            file_name=f"{metadata['template_name']}.json",
+            mime="application/json",
+            use_container_width=True
+        )
+    
+    else:  # Python Template
+        python_code = export_to_python(st.session_state.zones, metadata)
+        st.code(python_code, language="python", line_numbers=True)
+        
+        st.download_button(
+            "📥 Download Python Template",
+            data=python_code,
+            file_name=f"{metadata['template_name']}.py",
+            mime="text/plain",
+            use_container_width=True
+        )
+
+
+def process_test_images_and_extract(test_files, api_url):
+    """Process test images and extract all fields using configured zones"""
+    st.session_state.test_results = []
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for idx, file in enumerate(test_files):
+        status_text.text(f"Processing {file.name} ({idx + 1}/{len(test_files)})...")
+        
+        try:
+            img_bytes = file.getvalue()
+            img = Image.open(io.BytesIO(img_bytes))
+            
+            # Get OCR result
+            ocr_result = call_ocr_api(img_bytes, file.name, api_url)
+            
+            if ocr_result:
+                words = extract_words(ocr_result)
+                
+                # Extract all configured fields
+                field_results = {}
+                overall_valid = True
+                
+                for field_name, zone_config in st.session_state.zones.items():
+                    # Apply exporter logic to ensure normalized fields have consensus_extract
+                    # (this matches what the exporter does automatically)
+                    working_zone_config = zone_config.copy()
+                    if not working_zone_config.get('consensus_extract'):
+                        field_format = working_zone_config.get('format')
+                        if field_format in ['height', 'sex', 'eyes', 'weight']:
+                            working_zone_config['consensus_extract'] = r".*"  # Match any text, let normalizer handle extraction
+                    
+                    # TEST BOTH EXTRACTION METHODS SEPARATELY
+                    
+                    # 1. ZONE-BASED EXTRACTION (pure zone, no pattern fallback)
+                    zone_config_pure = working_zone_config.copy()
+                    zone_config_pure.pop('consensus_extract', None)  # Remove pattern fallback
+                    
+                    zone_model_results = extract_from_zone_multimodel(
+                        ocr_result,
+                        zone_config_pure,
+                        words
+                    )
+                    
+                    # Get zone-based consensus
+                    if zone_model_results:
+                        zone_vote_counts = Counter(zone_model_results.values())
+                        zone_consensus_text = zone_vote_counts.most_common(1)[0][0] if zone_vote_counts else ""
+                        zone_vote_count = zone_vote_counts[zone_consensus_text] if zone_consensus_text else 0
+                        zone_total_models = len(zone_model_results)
+                    else:
+                        zone_consensus_text = extract_from_zone(words, zone_config_pure)
+                        zone_vote_count, zone_total_models = 1, 1
+                        zone_model_results = {"single": zone_consensus_text}
+                    
+                    # Process zone result
+                    zone_processed_text, zone_normalized_text, zone_is_valid, field_format, format_options = process_extraction_result(
+                        zone_consensus_text, working_zone_config, field_name
+                    )
+                    
+                    # 2. PATTERN-BASED EXTRACTION (pure pattern, if consensus_extract exists)
+                    pattern_results = {}
+                    pattern_consensus_text = ""
+                    pattern_normalized_text = ""
+                    pattern_is_valid = False
+                    pattern_vote_count = 0
+                    pattern_total_models = 0
+                    pattern_model_results = {}
+                    
+                    consensus_extract_pattern = working_zone_config.get('consensus_extract', '')
+                    if consensus_extract_pattern and consensus_extract_pattern.strip():
+                        consensus_pattern = consensus_extract_pattern
+                        cleanup_pattern = working_zone_config.get('cleanup_pattern', '')
+                        
+                        # Test pattern like Build Mode: expanded zone (+5%) first, then full document fallback
+                        model_comparison = ocr_result.get('model_comparison', {})
+                        per_model_outputs = model_comparison.get('per_model_outputs', {})
+                        
+                        if per_model_outputs:
+                            # Create expanded zone config (like Build Mode)
+                            y_min, y_max = working_zone_config['y_range']
+                            x_min, x_max = working_zone_config['x_range']
+                            expand_factor = 0.05  # 5% expansion like Build Mode
+                            
+                            expanded_y = (max(0, y_min - expand_factor), min(1, y_max + expand_factor))
+                            expanded_x = (max(0, x_min - expand_factor), min(1, x_max + expand_factor))
+                            
+                            expanded_zone_config = working_zone_config.copy()
+                            expanded_zone_config['y_range'] = expanded_y
+                            expanded_zone_config['x_range'] = expanded_x
+                            expanded_zone_config['cleanup_pattern'] = ''  # Don't apply cleanup to zone text
+                            
+                            for model_name, model_data in per_model_outputs.items():
+                                # Get this model's word list
+                                model_words = model_data.get('words', [])
+                                if not model_words or len(model_words) != len(words):
+                                    pattern_model_results[model_name] = ""
+                                    continue
+                                
+                                # Build model-specific words with geometry (reuse consensus geometry, swap text)
+                                model_words_with_geometry = []
+                                for i, consensus_word in enumerate(words):
+                                    if i < len(model_words):
+                                        model_word_with_geom = consensus_word.copy()
+                                        model_word_with_geom['text'] = model_words[i]
+                                        model_words_with_geometry.append(model_word_with_geom)
+                                
+                                # Extract expanded zone text for this model
+                                expanded_zone_text = extract_from_zone(model_words_with_geometry, expanded_zone_config)
+                                full_text = model_data.get('raw_text', '')
+                                
+                                # Test pattern on expanded zone first, then full document (like Build Mode)
+                                extracted_value = ""
+                                for search_text in [expanded_zone_text, full_text]:
+                                    if search_text and not extracted_value:
+                                        try:
+                                            match = re.search(consensus_pattern, search_text, re.IGNORECASE | re.MULTILINE)
+                                            if match:
+                                                if match.lastindex and match.lastindex >= 1:
+                                                    # Has capturing group
+                                                    extracted_value = match.group(1).strip()
+                                                else:
+                                                    # No capturing group, use full match
+                                                    extracted_value = match.group(0).strip()
+                                                
+                                                # Apply cleanup to extracted value (not search text)
+                                                if cleanup_pattern and extracted_value:
+                                                    try:
+                                                        extracted_value = re.sub(cleanup_pattern, '', extracted_value, flags=re.IGNORECASE).strip()
+                                                    except:
+                                                        pass
+                                                break  # Found match, stop searching
+                                        except:
+                                            continue
+                                
+                                pattern_model_results[model_name] = extracted_value
+                            
+                            # Get pattern consensus
+                            if pattern_model_results:
+                                pattern_vote_counts = Counter(pattern_model_results.values())
+                                pattern_consensus_text = pattern_vote_counts.most_common(1)[0][0] if pattern_vote_counts else ""
+                                pattern_vote_count = pattern_vote_counts[pattern_consensus_text] if pattern_consensus_text else 0
+                                pattern_total_models = len(pattern_model_results)
+                                
+                                # Process pattern result
+                                pattern_processed_text, pattern_normalized_text, pattern_is_valid, _, _ = process_extraction_result(
+                                    pattern_consensus_text, working_zone_config, field_name
+                                )
+                    
+                    # Store results for BOTH methods
+                    field_results[field_name] = {
+                        # Zone-based results
+                        'zone_raw_consensus': zone_consensus_text,
+                        'zone_normalized': zone_normalized_text,
+                        'zone_is_valid': zone_is_valid,
+                        'zone_vote_count': zone_vote_count,
+                        'zone_total_models': zone_total_models,
+                        'zone_model_results': zone_model_results,
+                        
+                        # Pattern-based results
+                        'pattern_raw_consensus': pattern_consensus_text,
+                        'pattern_normalized': pattern_normalized_text,
+                        'pattern_is_valid': pattern_is_valid,
+                        'pattern_vote_count': pattern_vote_count,
+                        'pattern_total_models': pattern_total_models,
+                        'pattern_model_results': pattern_model_results,
+                        'has_pattern': bool(consensus_extract_pattern and consensus_extract_pattern.strip()),
+                        
+                        # Common info
+                        'field_format': field_format,
+                        'format_options': format_options,
+                        'zone_config': working_zone_config
+                    }
+                    
+                    # Overall validity: either method should work
+                    if not (zone_is_valid or pattern_is_valid):
+                        overall_valid = False
+                
+                # Store test result
+                st.session_state.test_results.append({
+                    'image_name': file.name,
+                    'image': img,
+                    'overall_valid': overall_valid,
+                    'field_results': field_results,
+                    'total_fields': len(field_results),
+                    'valid_fields': sum(1 for r in field_results.values() if (r['zone_is_valid'] or r['pattern_is_valid']))
+                })
+                
+        except Exception as e:
+            st.error(f"Error processing {file.name}: {str(e)}")
+        
+        progress_bar.progress((idx + 1) / len(test_files))
+    
+    status_text.empty()
+    progress_bar.empty()
+    
+    if st.session_state.test_results:
+        st.success(f"✅ Processed {len(st.session_state.test_results)} test images")
+        st.rerun()
+
+
+def render_test_results():
+    """Display comprehensive test results"""
+    st.markdown("#### 📊 Test Results")
+    
+    # Overall summary with zone vs pattern breakdown
+    total_images = len(st.session_state.test_results)
+    fully_valid_images = sum(1 for result in st.session_state.test_results if result['overall_valid'])
+    
+    # Calculate zone vs pattern success rates
+    zone_successes = 0
+    pattern_successes = 0
+    total_zone_fields = 0
+    total_pattern_fields = 0
+    
+    for result in st.session_state.test_results:
+        for field_result in result['field_results'].values():
+            total_zone_fields += 1
+            if field_result['zone_is_valid']:
+                zone_successes += 1
+            
+            if field_result['has_pattern']:
+                total_pattern_fields += 1
+                if field_result['pattern_is_valid']:
+                    pattern_successes += 1
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Images", total_images)
+    with col2:
+        st.metric("Fully Valid", fully_valid_images)
+    with col3:
+        zone_rate = (zone_successes / total_zone_fields * 100) if total_zone_fields > 0 else 0
+        st.metric("Zone Success", f"{zone_rate:.1f}%")
+    with col4:
+        pattern_rate = (pattern_successes / total_pattern_fields * 100) if total_pattern_fields > 0 else 0
+        st.metric("Pattern Success", f"{pattern_rate:.1f}%" if total_pattern_fields > 0 else "N/A")
+    
+    # Per-image results
+    for result in st.session_state.test_results:
+        status_icon = "✅" if result['overall_valid'] else "❌"
+        
+        with st.expander(
+            f"{status_icon} {result['image_name']} - {result['valid_fields']}/{result['total_fields']} fields valid",
+            expanded=not result['overall_valid']  # Expand failed images by default
+        ):
+            # Show image thumbnail
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                st.image(result['image'], caption=result['image_name'], width=200)
+            
+            with col2:
+                st.markdown("**Field Extraction Results:**")
+                
+                # Field results table - show both zone-based and pattern-based
+                for field_name, field_result in result['field_results'].items():
+                    zone_status = "✅" if field_result['zone_is_valid'] else "❌"
+                    pattern_status = "✅" if field_result['pattern_is_valid'] else "❌"
+                    has_pattern = field_result['has_pattern']
+                    
+                    # Field summary line
+                    zone_text = field_result['zone_normalized'] or field_result['zone_raw_consensus'] or "(empty)"
+                    pattern_text = field_result['pattern_normalized'] or field_result['pattern_raw_consensus'] or "(empty)"
+                    
+                    if has_pattern:
+                        summary = f"Zone: {zone_text[:25]} | Pattern: {pattern_text[:25]}"
+                        overall_status = "✅" if (field_result['zone_is_valid'] or field_result['pattern_is_valid']) else "❌"
+                    else:
+                        summary = f"Zone only: {zone_text[:35]}"
+                        overall_status = zone_status
+                    
+                    with st.expander(f"{overall_status} {field_name}: {summary}", expanded=False):
+                        # Show both extraction methods side by side
+                        if has_pattern:
+                            col1, col2 = st.columns(2)
+                            
+                            # Zone-based extraction column
+                            with col1:
+                                st.markdown(f"**🎯 Zone-Based Extraction** {zone_status}")
+                                
+                                if field_result['zone_normalized'] != field_result['zone_raw_consensus'] and field_result['zone_normalized']:
+                                    st.text("Raw extracted:")
+                                    st.code(field_result['zone_raw_consensus'] or "(empty)")
+                                    st.text("After normalization:")
+                                    st.code(field_result['zone_normalized'])
+                                else:
+                                    st.code(field_result['zone_raw_consensus'] or "(empty)")
+                                
+                                st.metric("Agreement", f"{field_result['zone_vote_count']}/{field_result['zone_total_models']}")
+                                
+                                # Zone model results
+                                if len(field_result['zone_model_results']) > 1:
+                                    st.markdown("**Per-model zone results:**")
+                                    for model_name, model_text in field_result['zone_model_results'].items():
+                                        color = "#28a745" if model_text == field_result['zone_raw_consensus'] else "#6c757d"
+                                        status = "🏆" if model_text == field_result['zone_raw_consensus'] else "📝"
+                                        
+                                        st.markdown(f"""
+                                        <div style="margin: 2px 0; padding: 2px 6px; background: {color}15; border-left: 2px solid {color}; border-radius: 3px;">
+                                            <span style="color: {color}; font-weight: bold; font-size: 12px;">
+                                                {status} {model_name.upper()}:
+                                            </span>
+                                            <span style="color: #333; margin-left: 4px; font-family: monospace; font-size: 12px;">
+                                                {model_text or '(empty)'}
+                                            </span>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                            
+                            # Pattern-based extraction column
+                            with col2:
+                                st.markdown(f"**🔍 Pattern-Based Extraction** {pattern_status}")
+                                
+                                if field_result['pattern_normalized'] != field_result['pattern_raw_consensus'] and field_result['pattern_normalized']:
+                                    st.text("Raw extracted:")
+                                    st.code(field_result['pattern_raw_consensus'] or "(empty)")
+                                    st.text("After normalization:")
+                                    st.code(field_result['pattern_normalized'])
+                                else:
+                                    st.code(field_result['pattern_raw_consensus'] or "(empty)")
+                                
+                                if field_result['pattern_total_models'] > 0:
+                                    st.metric("Agreement", f"{field_result['pattern_vote_count']}/{field_result['pattern_total_models']}")
+                                else:
+                                    st.metric("Pattern", "Not configured")
+                                
+                                # Pattern model results
+                                if len(field_result['pattern_model_results']) > 1:
+                                    st.markdown("**Per-model pattern results:**")
+                                    for model_name, model_text in field_result['pattern_model_results'].items():
+                                        color = "#28a745" if model_text == field_result['pattern_raw_consensus'] else "#6c757d"
+                                        status = "🏆" if model_text == field_result['pattern_raw_consensus'] else "📝"
+                                        
+                                        st.markdown(f"""
+                                        <div style="margin: 2px 0; padding: 2px 6px; background: {color}15; border-left: 2px solid {color}; border-radius: 3px;">
+                                            <span style="color: {color}; font-weight: bold; font-size: 12px;">
+                                                {status} {model_name.upper()}:
+                                            </span>
+                                            <span style="color: #333; margin-left: 4px; font-family: monospace; font-size: 12px;">
+                                                {model_text or '(empty)'}
+                                            </span>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                
+                                # Show the pattern being used
+                                if field_result['zone_config'].get('consensus_extract'):
+                                    st.markdown("**Pattern used:**")
+                                    st.code(field_result['zone_config']['consensus_extract'])
+                        
+                        else:
+                            # Zone-only field
+                            st.markdown(f"**🎯 Zone-Based Extraction Only** {zone_status}")
+                            st.info("💡 No pattern configured - add `consensus_extract` pattern for fallback extraction")
+                            
+                            if field_result['zone_normalized'] != field_result['zone_raw_consensus'] and field_result['zone_normalized']:
+                                st.text("Raw extracted:")
+                                st.code(field_result['zone_raw_consensus'] or "(empty)")
+                                st.text("After normalization:")
+                                st.code(field_result['zone_normalized'])
+                            else:
+                                st.code(field_result['zone_raw_consensus'] or "(empty)")
+                            
+                            st.metric("Agreement", f"{field_result['zone_vote_count']}/{field_result['zone_total_models']}")
+                            
+                            # Zone model results
+                            if len(field_result['zone_model_results']) > 1:
+                                st.markdown("**Per-model zone results:**")
+                                for model_name, model_text in field_result['zone_model_results'].items():
+                                    color = "#28a745" if model_text == field_result['zone_raw_consensus'] else "#6c757d"
+                                    status = "🏆" if model_text == field_result['zone_raw_consensus'] else "📝"
+                                    
+                                    st.markdown(f"""
+                                    <div style="margin: 2px 0; padding: 2px 6px; background: {color}15; border-left: 2px solid {color}; border-radius: 3px;">
+                                        <span style="color: {color}; font-weight: bold; font-size: 12px;">
+                                            {status} {model_name.upper()}:
+                                        </span>
+                                        <span style="color: #333; margin-left: 4px; font-family: monospace; font-size: 12px;">
+                                            {model_text or '(empty)'}
+                                        </span>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+
+
 def main():
     """Main application"""
     render_header()
