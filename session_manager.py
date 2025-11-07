@@ -428,3 +428,191 @@ def list_saved_sessions(save_dir: str = "zone_builder_sessions") -> List[Dict[st
             print(f"Could not read session {file_path}: {e}")
 
     return sorted(sessions, key=lambda x: x['modified'], reverse=True)
+
+
+def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse Python template file and extract zones and metadata
+    
+    Args:
+        file_content: Python template file content as string
+        
+    Returns:
+        Dict with 'zones' and 'metadata' keys, or None if parsing fails
+    """
+    import re
+    import ast
+    
+    try:
+        # Extract class name
+        class_match = re.search(r'class\s+(\w+)\s*\(', file_content)
+        class_name = class_match.group(1) if class_match else 'CustomTemplate'
+        
+        # Extract document_type (template_name)
+        doc_type_match = re.search(r'document_type\s*=\s*["\']([^"\']+)["\']', file_content)
+        template_name = doc_type_match.group(1) if doc_type_match else 'my_template'
+        
+        # Extract version
+        version_match = re.search(r'version\s*=\s*["\']([^"\']+)["\']', file_content)
+        version = version_match.group(1) if version_match else '1.0'
+        
+        # Extract FIELD_ZONES dictionary using ast.parse for robust parsing
+        # Find the FIELD_ZONES = { ... } block - match until the closing brace at same indentation
+        zones_match = re.search(r'FIELD_ZONES\s*=\s*\{(.*?)\n    \}', file_content, re.DOTALL)
+        
+        if not zones_match:
+            return None
+            
+        zones_dict_text = zones_match.group(1)
+        
+        # Manual parsing approach - more reliable for complex nested structures
+        zones = {}
+        
+        # Find each field entry: 'field_name': { ... },
+        # Use a more sophisticated approach to handle nested braces
+        field_start_pattern = r"'(\w+)':\s*\{"
+        
+        field_starts = [(m.start(), m.group(1)) for m in re.finditer(field_start_pattern, zones_dict_text)]
+        
+        for i, (start_pos, field_name) in enumerate(field_starts):
+            # Find the end of this field's config by counting braces
+            brace_count = 0
+            config_start = zones_dict_text.index('{', start_pos) + 1
+            config_end = config_start
+            
+            for j in range(config_start, len(zones_dict_text)):
+                if zones_dict_text[j] == '{':
+                    brace_count += 1
+                elif zones_dict_text[j] == '}':
+                    if brace_count == 0:
+                        config_end = j
+                        break
+                    brace_count -= 1
+            
+            field_config_text = zones_dict_text[config_start:config_end]
+            
+            # Now parse this field's configuration
+            zone_config = {}
+            
+            # Parse tuples (y_range, x_range)
+            for key in ['y_range', 'x_range']:
+                pattern = rf"'{key}':\s*\(([^)]+)\)"
+                match = re.search(pattern, field_config_text)
+                if match:
+                    vals = match.group(1).split(',')
+                    zone_config[key] = (float(vals[0].strip()), float(vals[1].strip()))
+            
+            # Parse string values
+            for key in ['format', 'date_format', 'height_format', 'weight_format']:
+                pattern = rf"'{key}':\s*'([^']+)'"
+                match = re.search(pattern, field_config_text)
+                if match:
+                    zone_config[key] = match.group(1)
+            
+            # Parse regex patterns (with r"" or r'' prefix, including multiline)
+            for key in ['pattern', 'cleanup_pattern', 'consensus_extract']:
+                # Try triple quotes first
+                pattern = rf'"{key}":\s*r"""(.*?)"""'
+                match = re.search(pattern, field_config_text, re.DOTALL)
+                if not match:
+                    pattern = rf"'{key}':\s*r'''(.*?)'''"
+                    match = re.search(pattern, field_config_text, re.DOTALL)
+                if not match:
+                    pattern = rf'"{key}":\s*r"((?:[^"\\]|\\.)*)"'
+                    match = re.search(pattern, field_config_text)
+                if not match:
+                    pattern = rf"'{key}':\s*r'((?:[^'\\]|\\.)*)'"
+                    match = re.search(pattern, field_config_text)
+                if match:
+                    # Keep the raw string as-is (backslashes preserved)
+                    zone_config[key] = match.group(1)
+            
+            # Parse boolean values
+            for key in ['uppercase', 'strict_validation', 'validate_alphabetic', 'allow_commas', 'allow_digits']:
+                if re.search(rf"'{key}':\s*True", field_config_text):
+                    zone_config[key] = True
+                elif re.search(rf"'{key}':\s*False", field_config_text):
+                    zone_config[key] = False
+            
+            if zone_config:  # Only add if we parsed something
+                zones[field_name] = zone_config
+        
+        # Fallback: try ast.literal_eval if manual parsing didn't work well
+        if len(zones) < 3:
+            zones_dict_text_cleaned = zones_dict_text
+            
+            # Replace r""" with """ (triple quotes)
+            zones_dict_text_cleaned = re.sub(r'r"""', '"""', zones_dict_text_cleaned)
+            # Replace r" with "
+            zones_dict_text_cleaned = re.sub(r'r"', '"', zones_dict_text_cleaned)
+            # Replace r' with '
+            zones_dict_text_cleaned = re.sub(r"r'", "'", zones_dict_text_cleaned)
+            
+            try:
+                zones = ast.literal_eval('{' + zones_dict_text_cleaned + '}')
+            except:
+                pass  # Keep the manually parsed zones
+        
+        # If still no zones, try one more fallback approach
+        if not zones:
+                zone_config = {}
+                
+                # Parse tuples (y_range, x_range)
+                for key in ['y_range', 'x_range']:
+                    pattern = rf"'{key}':\s*\(([^)]+)\)"
+                    match = re.search(pattern, field_config_text)
+                    if match:
+                        vals = match.group(1).split(',')
+                        zone_config[key] = (float(vals[0].strip()), float(vals[1].strip()))
+                
+                # Parse string values
+                for key in ['format', 'date_format', 'height_format', 'weight_format']:
+                    pattern = rf"'{key}':\s*'([^']+)'"
+                    match = re.search(pattern, field_config_text)
+                    if match:
+                        zone_config[key] = match.group(1)
+                
+                # Parse regex patterns (with r"" or r'' prefix, including multiline)
+                for key in ['pattern', 'cleanup_pattern', 'consensus_extract']:
+                    # Try triple quotes first
+                    pattern = rf'"{key}":\s*r"""(.*?)"""'
+                    match = re.search(pattern, field_config_text, re.DOTALL)
+                    if not match:
+                        pattern = rf"'{key}':\s*r'''(.*?)'''"
+                        match = re.search(pattern, field_config_text, re.DOTALL)
+                    if not match:
+                        pattern = rf'"{key}":\s*r"((?:[^"\\]|\\.)*)"'
+                        match = re.search(pattern, field_config_text)
+                    if not match:
+                        pattern = rf"'{key}':\s*r'((?:[^'\\]|\\.)*)'"
+                        match = re.search(pattern, field_config_text)
+                    if match:
+                        # Keep the raw string as-is (backslashes preserved)
+                        zone_config[key] = match.group(1)
+                
+                # Parse boolean values
+                for key in ['uppercase', 'strict_validation', 'validate_alphabetic']:
+                    pattern = rf"'{key}':\s*True"
+                    if re.search(pattern, field_config_text):
+                        zone_config[key] = True
+                
+        # If still no zones, try one more fallback approach
+        if not zones:
+            return None
+        
+        metadata = {
+            'template_name': template_name,
+            'class_name': class_name,
+            'version': version
+        }
+        
+        return {
+            'zones': zones,
+            'metadata': metadata
+        }
+        
+    except Exception as e:
+        print(f"Error parsing template file: {e}")
+        import traceback
+        traceback.print_exc()
+        return None

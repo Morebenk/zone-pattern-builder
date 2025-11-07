@@ -6,12 +6,10 @@ Optimized workflow for zone and pattern-based extraction configuration.
 """
 
 import streamlit as st
-import requests
-import json
 import re
 from pathlib import Path
-from PIL import Image, ImageDraw
-from typing import Dict, List, Optional, Tuple, Set
+from PIL import Image
+from typing import List
 from collections import defaultdict, Counter
 import io
 import sys
@@ -22,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Import modular components
 from zone_builder.field_formats import (
     FIELD_FORMATS, DATE_FORMATS, HEIGHT_FORMATS, WEIGHT_FORMATS,
-    get_format_defaults, get_format_help_text,
     get_date_pattern, get_height_pattern, get_weight_pattern,
     auto_detect_format
 )
@@ -31,7 +28,6 @@ from zone_builder.exporters import (
 )
 from zone_builder.zone_operations import (
     calculate_aggregate_zone, extract_from_zone, extract_from_zone_multimodel,
-    get_consensus_from_models, is_in_zone
 )
 from zone_builder.ocr_utils import (
     call_ocr_api, extract_words, draw_visualization
@@ -40,8 +36,7 @@ from zone_builder.field_normalizers import (
     normalize_field
 )
 from zone_builder.session_manager import (
-    save_session, load_session, get_session_summary,
-    migrate_old_session, auto_save_session
+    save_session, load_session, load_template_file
 )
 from zone_builder.settings_manager import (
     init_settings, get_setting, set_setting, render_settings_panel
@@ -62,7 +57,7 @@ init_settings()
 USA_FIELDS = [
     "document_number", "license_class", "date_of_birth", "expiration_date",
     "issue_date", "first_name", "last_name", "address", "endorsement",
-    "restrictions", "sex", "hair", "eyes", "height", "weight", "dd_code"
+    "restriction", "sex", "hair", "eyes", "height", "weight", "dd_code"
 ]
 FRANCE_FIELDS = [
     "document_number", "nationality", "last_name", "alternate_name",
@@ -411,20 +406,45 @@ def render_session_management():
         )
 
     uploaded_session = st.file_uploader(
-        "Load session",
-        type=['json', 'gz'],
-        key="session_loader"
+        "Load session or template",
+        type=['json', 'gz', 'py'],
+        key="session_loader",
+        help="Load .json.gz session (with images) or .py template (zones only)"
     )
 
     if uploaded_session:
         if st.button("📥 Load", type="primary", width='stretch'):
             try:
-                session_data = load_session(uploaded_session.getvalue())
-                if session_data:
-                    st.session_state.update(session_data)
-                    # Metadata widget syncing happens automatically in render_template_metadata()
-                    st.success("✅ Session loaded")
-                    st.rerun()
+                file_name = uploaded_session.name
+                file_content = uploaded_session.getvalue()
+                
+                # Check if it's a Python template file
+                if file_name.endswith('.py'):
+                    # Parse template file
+                    file_text = file_content.decode('utf-8')
+                    template_data = load_template_file(file_text)
+                    
+                    if template_data:
+                        # Load zones
+                        st.session_state.zones = template_data['zones']
+                        
+                        # Load metadata
+                        if 'metadata' in template_data:
+                            st.session_state.metadata = template_data['metadata']
+                        
+                        st.success(f"✅ Template loaded: {len(template_data['zones'])} zones")
+                        st.info("💡 Upload images to start building/testing")
+                        st.rerun()
+                    else:
+                        st.error("❌ Could not parse template file")
+                else:
+                    # Load session file (.json or .gz)
+                    session_data = load_session(file_content)
+                    if session_data:
+                        st.session_state.update(session_data)
+                        # Metadata widget syncing happens automatically in render_template_metadata()
+                        st.success("✅ Session loaded")
+                        st.rerun()
             except Exception as e:
                 st.error(f"Error: {str(e)}")
 
@@ -703,13 +723,27 @@ def render_field_and_image_selector():
                 st.rerun()
 
             # Reset to auto-calculated button
-            if auto_zones_key in st.session_state:
-                if st.button("🔄 Reset to Auto", use_container_width=True, help="Restore auto-calculated zone from selections"):
-                    auto_zone = st.session_state[auto_zones_key]
+            if st.button("🔄 Reset to Auto", use_container_width=True, help="Recalculate zone from current selections"):
+                # Recalculate zone from current selections
+                auto_zone = calculate_aggregate_zone(
+                    st.session_state.images,
+                    st.session_state.selections
+                )
+                if auto_zone and auto_zone.get('y_range') != (0, 1):
+                    # Update the zone in session state
                     zone_config['y_range'] = auto_zone['y_range']
                     zone_config['x_range'] = auto_zone.get('x_range', (0, 1))
                     st.session_state.zones[st.session_state.current_field] = zone_config
+                    
+                    # Clear the widget keys so they refresh with new values
+                    field = st.session_state.current_field
+                    for key in [f"y_min_{field}", f"y_max_{field}", f"x_min_{field}", f"x_max_{field}"]:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    
                     st.rerun()
+                else:
+                    st.warning("⚠️ No words selected. Select words to calculate zone.")
 
         st.markdown("---")
         # Progress
@@ -1082,9 +1116,6 @@ def render_test_mode():
         st.text(f"{status} {field_name}: {success_rate:.0f}% success ({success_count}/{total_count})")
 
 
-
-
-
 def render_welcome_screen():
     """Welcome screen"""
     st.markdown("""
@@ -1099,9 +1130,6 @@ def render_welcome_screen():
 
     **Upload images in the sidebar to begin →**
     """)
-
-
-
 
 
 def render_test_mode():

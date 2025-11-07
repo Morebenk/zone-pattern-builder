@@ -6,12 +6,11 @@ Complete OCR field zone creation tool with professional UI and full functionalit
 """
 
 import streamlit as st
-import requests
 import json
 import re
 from pathlib import Path
-from PIL import Image, ImageDraw
-from typing import Dict, List, Optional, Tuple, Set
+from PIL import Image
+from typing import List
 from collections import defaultdict, Counter
 import io
 import sys
@@ -61,7 +60,7 @@ init_settings()
 USA_FIELDS = [
     "document_number", "license_class", "date_of_birth", "expiration_date",
     "issue_date", "first_name", "last_name", "address", "endorsement",
-    "restrictions", "sex", "hair", "eyes", "height", "weight", "dd_code"
+    "restriction", "sex", "hair", "eyes", "height", "weight", "dd_code"
 ]
 FRANCE_FIELDS = [
     "document_number", "nationality", "last_name", "alternate_name",
@@ -119,7 +118,7 @@ st.markdown("""
 USA_FIELDS = [
     "document_number", "license_class", "date_of_birth", "expiration_date",
     "issue_date", "first_name", "last_name", "address", "endorsement",
-    "restrictions", "sex", "hair", "eyes", "height", "weight", "dd_code"
+    "restriction", "sex", "hair", "eyes", "height", "weight", "dd_code"
 ]
 
 FRANCE_FIELDS = [
