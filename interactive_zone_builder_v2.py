@@ -351,30 +351,20 @@ def process_images(uploaded_files, api_url):
 
 
 def render_template_metadata():
-    """Render template metadata configuration"""
+    """Render template metadata configuration - simplified to essential fields only"""
     # Initialize metadata in session state if not present
     if 'metadata' not in st.session_state:
         st.session_state.metadata = {
             'template_name': 'my_template',
             'class_name': 'MyTemplate',
-            'document_type': 'Driver License',
-            'region': 'USA',
-            'version': '1.0',
-            'description': 'Auto-generated template from Zone Builder'
+            'version': '1.0'
         }
 
     # Force widget keys to match metadata values (ensures loaded values appear)
     # This runs every render to keep widgets synced with metadata
     st.session_state['metadata_template_name'] = st.session_state.metadata.get('template_name', 'my_template')
     st.session_state['metadata_class_name'] = st.session_state.metadata.get('class_name', 'MyTemplate')
-    st.session_state['metadata_region'] = st.session_state.metadata.get('region', 'USA')
     st.session_state['metadata_version'] = st.session_state.metadata.get('version', '1.0')
-    st.session_state['metadata_description'] = st.session_state.metadata.get('description', 'Auto-generated template from Zone Builder')
-
-    # For selectbox, we need to store the index
-    doc_types = ["Driver License", "ID Card", "Passport", "Other"]
-    doc_type_value = st.session_state.metadata.get('document_type', 'Driver License')
-    st.session_state['metadata_document_type_idx'] = doc_types.index(doc_type_value) if doc_type_value in doc_types else 0
 
     template_name = st.text_input(
         "Template Name",
@@ -392,22 +382,6 @@ def render_template_metadata():
     )
     st.session_state.metadata['class_name'] = class_name
 
-    document_type = st.selectbox(
-        "Document Type",
-        doc_types,
-        index=st.session_state.get('metadata_document_type_idx', 0),
-        help="Type of document this template is for"
-    )
-    st.session_state.metadata['document_type'] = document_type
-
-    region = st.text_input(
-        "Region",
-        help="Country or state (e.g., 'USA/Texas', 'France')",
-        placeholder="e.g., USA/Texas",
-        key="metadata_region"
-    )
-    st.session_state.metadata['region'] = region
-
     version = st.text_input(
         "Version",
         help="Template version for tracking changes",
@@ -415,15 +389,6 @@ def render_template_metadata():
         key="metadata_version"
     )
     st.session_state.metadata['version'] = version
-
-    description = st.text_area(
-        "Description",
-        help="Brief description of what this template extracts",
-        placeholder="e.g., Field extraction for Texas Driver License - Front side",
-        key="metadata_description",
-        height=80
-    )
-    st.session_state.metadata['description'] = description
 
 
 def render_session_management():
@@ -1117,63 +1082,7 @@ def render_test_mode():
         st.text(f"{status} {field_name}: {success_rate:.0f}% success ({success_count}/{total_count})")
 
 
-def render_export_mode():
-    """Export mode"""
-    st.markdown("### 📤 Export Configuration")
 
-    if not st.session_state.zones:
-        st.info("No zones to export. Create zones in Build mode first.")
-        return
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.metric("Total Zones", len(st.session_state.zones))
-        for field_name in st.session_state.zones:
-            st.text(f"• {field_name}")
-
-    with col2:
-        # Get metadata from session state (configured in sidebar)
-        metadata = st.session_state.get('metadata', {
-            'template_name': 'my_template',
-            'class_name': 'CustomTemplate',
-            'document_type': 'Driver License',
-            'region': 'USA',
-            'version': '1.0',
-            'description': 'Auto-generated template'
-        })
-
-        # Show current metadata
-        st.info(f"**Using metadata from sidebar:**\n\n"
-                f"Template: `{metadata.get('template_name', 'N/A')}`\n\n"
-                f"Class: `{metadata.get('class_name', 'N/A')}`\n\n"
-                f"Document: `{metadata.get('document_type', 'N/A')}`\n\n"
-                f"Region: `{metadata.get('region', 'N/A')}`\n\n"
-                f"Version: `{metadata.get('version', 'N/A')}`\n\n"
-                f"Description: _{metadata.get('description', 'N/A')}_")
-
-        export_format = st.radio("Format", ["JSON", "Python"])
-
-        if export_format == "JSON":
-            zones_json = export_to_json(st.session_state.zones)
-            template_name = metadata.get('template_name', 'zones')
-            st.download_button(
-                "📥 Download JSON",
-                data=zones_json,
-                file_name=f"{template_name}.json",
-                mime="application/json",
-                width='stretch'
-            )
-        else:
-            python_code = export_to_python(st.session_state.zones, metadata)
-            template_name = metadata.get('template_name', 'template')
-            st.download_button(
-                "📥 Download Python",
-                data=python_code,
-                file_name=f"{template_name}.py",
-                mime="text/plain",
-                width='stretch'
-            )
 
 
 def render_welcome_screen():
@@ -1275,40 +1184,23 @@ def render_export_mode():
                     for pattern_type, pattern in preview['patterns'].items():
                         st.code(f"{pattern_type}: {pattern}")
 
-    # Template metadata configuration
+    # Get metadata from session state (configured in sidebar)
+    metadata = st.session_state.get('metadata', {
+        'template_name': 'my_template',
+        'class_name': 'MyTemplate',
+        'version': '1.0'
+    })
+
+    # Auto-set document_type to equal template_name (required for export)
+    metadata['document_type'] = metadata.get('template_name', 'my_template')
+
+    # Show current metadata (simplified to essential fields only)
     st.markdown("#### 📄 Template Metadata")
-    
-    metadata = {}
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        metadata['template_name'] = st.text_input(
-            "Template Name",
-            value=get_setting('export', 'template_name', 'custom_template'),
-            help="Used for class name and file name"
-        )
-        metadata['document_type'] = st.text_input(
-            "Document Type",
-            value=metadata['template_name'],
-            help="Document type identifier"
-        )
-        metadata['region'] = st.text_input(
-            "Region",
-            value=get_setting('export', 'region', 'USA'),
-            help="Geographic region (USA, France, etc.)"
-        )
-    
-    with col2:
-        metadata['version'] = st.text_input(
-            "Version",
-            value=get_setting('export', 'version', '1.0'),
-            help="Template version"
-        )
-        metadata['author'] = st.text_input(
-            "Author",
-            value=get_setting('export', 'author', 'Zone Builder'),
-            help="Template author"
-        )
+    st.info(f"**Using metadata from sidebar:**\n\n"
+            f"Template: `{metadata.get('template_name', 'N/A')}`\n\n"
+            f"Class: `{metadata.get('class_name', 'N/A')}`\n\n"
+            f"Version: `{metadata.get('version', 'N/A')}`\n\n"
+            f"Document Type: `{metadata.get('document_type', 'N/A')}`")
 
     # Export section
     st.markdown("#### 💾 Export Options")
