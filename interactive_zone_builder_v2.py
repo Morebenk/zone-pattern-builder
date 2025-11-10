@@ -572,6 +572,10 @@ def render_build_mode():
                 )
                 zone_config['pattern'] = validation_pattern
 
+        # Custom Pattern Tester
+        st.divider()
+        render_custom_pattern_tester(zone_config, st.session_state.current_field)
+
         # Zone-based extraction section
         st.divider()
         st.markdown("### 📦 Zone-Based Extraction")
@@ -835,6 +839,187 @@ def render_field_and_image_selector():
                         else:
                             current_selections.add(i)
                         st.rerun()
+
+
+def render_custom_pattern_tester(zone_config: dict, field_name: str = None):
+    """
+    Interactive pattern testing sandbox - test patterns on custom text
+    without relying on OCR output
+    """
+    with st.expander("🧪 **Pattern Testing Sandbox**", expanded=False):
+        st.caption("Test your patterns on custom text - updates automatically as you type")
+
+        # Custom text input - use text_input for instant updates
+        custom_text = st.text_input(
+            "Input Text",
+            value="",
+            placeholder="e.g., DD: 12345678",
+            help="Enter any text to test your patterns",
+            key=f"custom_text_input_{field_name}"
+        )
+
+        if not custom_text.strip():
+            st.info("💡 Enter some text above to start testing patterns")
+            return
+
+        # Get patterns from config
+        cleanup_pattern = zone_config.get('cleanup_pattern', '')
+        validation_pattern = zone_config.get('pattern', '')
+        consensus_pattern = zone_config.get('consensus_extract', '')
+
+        # Pattern selection checkboxes - BEFORE application
+        st.markdown("**Select patterns to apply:**")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            apply_consensus = st.checkbox(
+                "Consensus Extract",
+                value=False,
+                key=f"test_apply_consensus_{field_name}",
+                disabled=not consensus_pattern.strip()
+            )
+            if consensus_pattern.strip():
+                st.caption(f"`{consensus_pattern[:40]}...`" if len(consensus_pattern) > 40 else f"`{consensus_pattern}`")
+
+        with col2:
+            apply_cleanup = st.checkbox(
+                "Cleanup",
+                value=False,
+                key=f"test_apply_cleanup_{field_name}",
+                disabled=not cleanup_pattern.strip()
+            )
+            if cleanup_pattern.strip():
+                st.caption(f"`{cleanup_pattern[:40]}...`" if len(cleanup_pattern) > 40 else f"`{cleanup_pattern}`")
+
+        with col3:
+            apply_validation = st.checkbox(
+                "Validation",
+                value=True,
+                key=f"test_apply_validation_{field_name}",
+                disabled=not validation_pattern.strip()
+            )
+            if validation_pattern.strip():
+                st.caption(f"`{validation_pattern[:40]}...`" if len(validation_pattern) > 40 else f"`{validation_pattern}`")
+
+        st.divider()
+
+        # Process the text step by step
+        current_text = custom_text
+        model_colors = {'input': '#6c757d', 'consensus': '#9C27B0', 'cleanup': '#2196F3', 'normalize': '#FF9800', 'valid': '#4CAF50', 'invalid': '#F44336'}
+
+        # Show original input
+        st.markdown(f"""
+        <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {model_colors['input']}15, transparent); border-left: 3px solid {model_colors['input']}; border-radius: 4px;">
+            <span style="color: {model_colors['input']}; font-weight: bold; font-size: 14px;">📥 INPUT:</span>
+            <span style="color: #333; margin-left: 10px; font-family: monospace;">{custom_text}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Step 1: Consensus Extract
+        if apply_consensus and consensus_pattern.strip():
+            try:
+                match = re.search(consensus_pattern, current_text, re.IGNORECASE | re.MULTILINE)
+                if match:
+                    prev_text = current_text
+                    current_text = match.group(1).strip() if (match.lastindex and match.lastindex >= 1) else match.group(0).strip()
+
+                    st.markdown(f"""
+                    <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {model_colors['consensus']}15, transparent); border-left: 3px solid {model_colors['consensus']}; border-radius: 4px;">
+                        <span style="color: {model_colors['consensus']}; font-weight: bold; font-size: 14px;">✅ CONSENSUS EXTRACT:</span>
+                        <span style="color: #666; margin-left: 10px; font-family: monospace;">{prev_text}</span>
+                        <span style="color: #999; margin: 0 5px;">→</span>
+                        <span style="color: #333; font-weight: 500; font-family: monospace;">{current_text}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {model_colors['invalid']}15, transparent); border-left: 3px solid {model_colors['invalid']}; border-radius: 4px;">
+                        <span style="color: {model_colors['invalid']}; font-weight: bold; font-size: 14px;">❌ CONSENSUS EXTRACT:</span>
+                        <span style="color: #333; margin-left: 10px; font-family: monospace;">No match</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    current_text = ""
+            except re.error as e:
+                st.error(f"❌ Consensus pattern error: {e}")
+                current_text = ""
+
+        # Step 2: Cleanup
+        if apply_cleanup and cleanup_pattern.strip() and current_text:
+            try:
+                prev_text = current_text
+                current_text = re.sub(cleanup_pattern, '', current_text, flags=re.IGNORECASE).strip()
+
+                if prev_text != current_text:
+                    st.markdown(f"""
+                    <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {model_colors['cleanup']}15, transparent); border-left: 3px solid {model_colors['cleanup']}; border-radius: 4px;">
+                        <span style="color: {model_colors['cleanup']}; font-weight: bold; font-size: 14px;">✅ CLEANUP:</span>
+                        <span style="color: #666; margin-left: 10px; font-family: monospace;">{prev_text}</span>
+                        <span style="color: #999; margin: 0 5px;">→</span>
+                        <span style="color: #333; font-weight: 500; font-family: monospace;">{current_text if current_text else '(empty)'}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {model_colors['cleanup']}15, transparent); border-left: 3px solid {model_colors['cleanup']}; border-radius: 4px;">
+                        <span style="color: {model_colors['cleanup']}; font-weight: bold; font-size: 14px;">ℹ️ CLEANUP:</span>
+                        <span style="color: #333; margin-left: 10px; font-family: monospace;">No changes</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+            except re.error as e:
+                st.error(f"❌ Cleanup pattern error: {e}")
+
+        # Step 3: Normalization (always apply if we have text)
+        if current_text:
+            field_format = zone_config.get('format', 'string')
+            format_options = {}
+
+            if field_format == 'date':
+                format_options['date_format'] = zone_config.get('date_format', 'MM.DD.YYYY')
+            elif field_format == 'height':
+                format_options['height_format'] = zone_config.get('height_format', 'auto')
+            elif field_format == 'weight':
+                format_options['weight_format'] = zone_config.get('weight_format', 'auto')
+
+            prev_text = current_text
+            normalized = normalize_field(current_text, field_format, field_name, **format_options)
+
+            if normalized and normalized != current_text:
+                current_text = normalized
+                st.markdown(f"""
+                <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {model_colors['normalize']}15, transparent); border-left: 3px solid {model_colors['normalize']}; border-radius: 4px;">
+                    <span style="color: {model_colors['normalize']}; font-weight: bold; font-size: 14px;">✅ NORMALIZE ({field_format}):</span>
+                    <span style="color: #666; margin-left: 10px; font-family: monospace;">{prev_text}</span>
+                    <span style="color: #999; margin: 0 5px;">→</span>
+                    <span style="color: #333; font-weight: 500; font-family: monospace;">{current_text}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # Step 4: Validation
+        if current_text:
+            if apply_validation and validation_pattern.strip():
+                try:
+                    is_valid = bool(re.match(validation_pattern, current_text))
+                    color = model_colors['valid'] if is_valid else model_colors['invalid']
+                    status = "✅ VALID" if is_valid else "❌ INVALID"
+
+                    st.markdown(f"""
+                    <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {color}15, transparent); border-left: 3px solid {color}; border-radius: 4px;">
+                        <span style="color: {color}; font-weight: bold; font-size: 14px;">{status}:</span>
+                        <span style="color: #333; margin-left: 10px; font-family: monospace; font-weight: 600;">{current_text}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                except re.error as e:
+                    st.error(f"❌ Validation pattern error: {e}")
+            else:
+                # No validation or not enabled - show final result
+                st.markdown(f"""
+                <div style="margin: 8px 0; padding: 8px; background: linear-gradient(90deg, {model_colors['valid']}15, transparent); border-left: 3px solid {model_colors['valid']}; border-radius: 4px;">
+                    <span style="color: {model_colors['valid']}; font-weight: bold; font-size: 14px;">✅ RESULT:</span>
+                    <span style="color: #333; margin-left: 10px; font-family: monospace; font-weight: 600;">{current_text}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ Empty result - no output from extraction pipeline")
 
 
 def render_zone_extraction_section(zone_config, field_name: str = None):
