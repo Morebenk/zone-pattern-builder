@@ -91,11 +91,12 @@ def calculate_aggregate_zone(
 
 def extract_from_zone(words: List[Dict], zone_config: Dict) -> str:
     """
-    Extract text from zone with cleanup and pattern validation
+    Extract text from zone with cleanup (NO fallback to consensus_extract)
 
-    Simulates HybridTemplate extraction logic:
-    1. Extract from zone (primary)
-    2. If empty, try consensus_extract on full text (fallback)
+    Pure zone-based extraction:
+    1. Extract from zone only
+    2. Apply cleanup pattern
+    3. Return result (empty if no words in zone)
     """
     x_range = zone_config['x_range']
     y_range = zone_config['y_range']
@@ -116,33 +117,7 @@ def extract_from_zone(words: List[Dict], zone_config: Dict) -> str:
             except:
                 pass
 
-    # If zone extraction failed and consensus_extract is defined, try it as fallback
-    # This simulates HybridTemplate._apply_consensus_for_fields behavior
-    if not text and zone_config.get('consensus_extract'):
-        consensus_pattern = zone_config['consensus_extract']
-
-        # Build full text from all words (sorted by reading order)
-        all_words = sorted(words, key=lambda w: (round(w['center_y'], 1), w['center_x']))
-        full_text = ' '.join(w['text'] for w in all_words)
-
-        try:
-            match = re.search(consensus_pattern, full_text, re.IGNORECASE | re.MULTILINE)
-            if match:
-                # Flexible extraction: use group(1) if available, otherwise group(0)
-                if match.lastindex and match.lastindex >= 1:
-                    # Has capturing group - use captured value
-                    text = match.group(1).strip()
-                else:
-                    # No capturing group - use full match and apply cleanup
-                    text = match.group(0).strip()
-                    if cleanup:
-                        try:
-                            text = re.sub(cleanup, '', text, flags=re.IGNORECASE).strip()
-                        except:
-                            pass
-        except Exception as e:
-            print(f"⚠️ consensus_extract pattern error: {e}")
-
+    # NO FALLBACK to consensus_extract - zone extraction is independent from pattern extraction
     return text
 
 
