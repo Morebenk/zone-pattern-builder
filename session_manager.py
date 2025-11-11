@@ -494,10 +494,15 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
             # Now parse this field's configuration
             zone_config = {}
             
-            # Parse tuples (y_range, x_range)
+            # Parse tuples or lists (y_range, x_range)
             for key in ['y_range', 'x_range']:
+                # Try tuple syntax first: (0.1, 0.2)
                 pattern = rf"'{key}':\s*\(([^)]+)\)"
                 match = re.search(pattern, field_config_text)
+                if not match:
+                    # Try list syntax: [0.1, 0.2]
+                    pattern = rf"'{key}':\s*\[([^\]]+)\]"
+                    match = re.search(pattern, field_config_text)
                 if match:
                     vals = match.group(1).split(',')
                     zone_config[key] = (float(vals[0].strip()), float(vals[1].strip()))
@@ -557,10 +562,15 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
         if not zones:
                 zone_config = {}
                 
-                # Parse tuples (y_range, x_range)
+                # Parse tuples or lists (y_range, x_range)
                 for key in ['y_range', 'x_range']:
+                    # Try tuple syntax first: (0.1, 0.2)
                     pattern = rf"'{key}':\s*\(([^)]+)\)"
                     match = re.search(pattern, field_config_text)
+                    if not match:
+                        # Try list syntax: [0.1, 0.2]
+                        pattern = rf"'{key}':\s*\[([^\]]+)\]"
+                        match = re.search(pattern, field_config_text)
                     if match:
                         vals = match.group(1).split(',')
                         zone_config[key] = (float(vals[0].strip()), float(vals[1].strip()))

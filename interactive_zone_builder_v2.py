@@ -355,14 +355,10 @@ def render_template_metadata():
             'version': '1.0'
         }
 
-    # Force widget keys to match metadata values (ensures loaded values appear)
-    # This runs every render to keep widgets synced with metadata
-    st.session_state['metadata_template_name'] = st.session_state.metadata.get('template_name', 'my_template')
-    st.session_state['metadata_class_name'] = st.session_state.metadata.get('class_name', 'MyTemplate')
-    st.session_state['metadata_version'] = st.session_state.metadata.get('version', '1.0')
-
+    # Use value parameter to show loaded metadata, but allow editing
     template_name = st.text_input(
         "Template Name",
+        value=st.session_state.metadata.get('template_name', 'my_template'),
         help="Used for file naming (e.g., 'texas_dl_front')",
         placeholder="e.g., texas_dl_front",
         key="metadata_template_name"
@@ -371,6 +367,7 @@ def render_template_metadata():
 
     class_name = st.text_input(
         "Class Name",
+        value=st.session_state.metadata.get('class_name', 'MyTemplate'),
         help="Python class name for code generation (e.g., 'TexasDLFront')",
         placeholder="e.g., TexasDLFront",
         key="metadata_class_name"
@@ -379,6 +376,7 @@ def render_template_metadata():
 
     version = st.text_input(
         "Version",
+        value=st.session_state.metadata.get('version', '1.0'),
         help="Template version for tracking changes",
         placeholder="e.g., 1.0",
         key="metadata_version"
@@ -423,15 +421,24 @@ def render_session_management():
                     # Parse template file
                     file_text = file_content.decode('utf-8')
                     template_data = load_template_file(file_text)
-                    
+
                     if template_data:
-                        # Load zones
-                        st.session_state.zones = template_data['zones']
-                        
+                        # Load zones and ensure they have required fields
+                        loaded_zones = template_data['zones']
+
+                        # Add default y_range and x_range if missing
+                        for field_name, zone_config in loaded_zones.items():
+                            if 'y_range' not in zone_config:
+                                zone_config['y_range'] = (0, 1)
+                            if 'x_range' not in zone_config:
+                                zone_config['x_range'] = (0, 1)
+
+                        st.session_state.zones = loaded_zones
+
                         # Load metadata
                         if 'metadata' in template_data:
                             st.session_state.metadata = template_data['metadata']
-                        
+
                         st.success(f"✅ Template loaded: {len(template_data['zones'])} zones")
                         st.info("💡 Upload images to start building/testing")
                         st.rerun()
@@ -550,10 +557,19 @@ def render_build_mode():
         # Common patterns (shared by both extraction methods)
         st.divider()
         st.markdown("### 🔧 Common Extraction Patterns")
-        st.caption("These patterns are used by both zone-based and pattern-based extraction")
+        st.caption("Configure cleanup, validation, and pattern-based extraction patterns")
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
+            consensus_pattern = st.text_input(
+                "Consensus Extract",
+                value=zone_config.get('consensus_extract', ''),
+                placeholder="e.g., (?:ID|1D)[:\\s]*(\\d{8})",
+                help="Pattern for pattern-based extraction (searches expanded zone +5% only)"
+            )
+            zone_config['consensus_extract'] = consensus_pattern
+
+        with col2:
             cleanup_pattern = st.text_input(
                 "Cleanup Pattern",
                 value=zone_config.get('cleanup_pattern', ''),
@@ -562,7 +578,7 @@ def render_build_mode():
             )
             zone_config['cleanup_pattern'] = cleanup_pattern
 
-        with col2:
+        with col3:
             if field_format in ['string', 'number']:
                 validation_pattern = st.text_input(
                     "Validation Pattern",
@@ -581,10 +597,10 @@ def render_build_mode():
         st.markdown("### 📦 Zone-Based Extraction")
         render_zone_extraction_section(zone_config, st.session_state.current_field)
 
-        # Pattern-based fallback section
+        # Pattern-based extraction section (separate from zone-based)
         st.divider()
-        st.markdown("### 🔄 Pattern-Based Fallback")
-        st.caption("Used when zone extraction fails (searches expanded zone +5%)")
+        st.markdown("### 🔄 Pattern-Based Extraction")
+        st.caption("Alternative extraction method using regex patterns (searches expanded zone +5% only)")
         render_pattern_extraction_section(zone_config, st.session_state.current_field)
 
         # Save/Delete buttons
@@ -1042,30 +1058,63 @@ def render_zone_extraction_section(zone_config, field_name: str = None):
 
     # Preview for each image with expandable details
     for img_idx, img_data in enumerate(st.session_state.images):
-        model_results = extract_from_zone_multimodel(
+        model_results_raw = extract_from_zone_multimodel(
             img_data.get('ocr_result', {}), zone_config, img_data.get('words', [])
         )
 
-        # Calculate consensus
-        if model_results:
-            vote_counts = Counter(model_results.values())
-            consensus_text = vote_counts.most_common(1)[0][0] if vote_counts else ""
-            vote_count = vote_counts[consensus_text] if consensus_text else 0
-            total_models = len(model_results)
-        else:
-            consensus_text = extract_from_zone(img_data['words'], zone_config)
-            vote_count, total_models = 1, 1
+        # Prepare normalization settings
+        field_format = zone_config.get('format', 'string')
+        format_options = {}
+        if field_format == 'date':
+            format_options['date_format'] = zone_config.get('date_format', 'MM.DD.YYYY')
+        elif field_format == 'height':
+            format_options['height_format'] = zone_config.get('height_format', 'auto')
+        elif field_format == 'weight':
+            format_options['weight_format'] = zone_config.get('weight_format', 'auto')
 
-        # Process result: normalize, validate (cleanup already applied in extraction)
-        consensus_text, normalized_text, is_valid, field_format, format_options = process_extraction_result(
-            consensus_text, zone_config, field_name
-        )
+        pattern = zone_config.get('pattern', '')
+
+        # Normalize and validate each model's result BEFORE voting
+        if model_results_raw:
+            model_results_normalized = {}
+            for model_name, raw_text in model_results_raw.items():
+                if raw_text:
+                    normalized = normalize_field(raw_text, field_format, field_name, **format_options)
+                    # Only include valid normalized results in voting
+                    if normalized and (not pattern or re.match(pattern, normalized)):
+                        model_results_normalized[model_name] = normalized
+
+            # Vote on NORMALIZED values
+            if model_results_normalized:
+                vote_counts = Counter(model_results_normalized.values())
+                normalized_text = vote_counts.most_common(1)[0][0]
+                vote_count = vote_counts[normalized_text]
+                total_models = len(model_results_normalized)
+                # Find a raw text that normalized to the consensus (for display)
+                consensus_text = next((raw for model, raw in model_results_raw.items()
+                                      if model in model_results_normalized
+                                      and model_results_normalized[model] == normalized_text), normalized_text)
+                is_valid = True  # Already validated during normalization
+            else:
+                # No valid normalized results
+                normalized_text = None
+                consensus_text = ""
+                vote_count = 0
+                total_models = len(model_results_raw)
+                is_valid = False
+        else:
+            # Fallback to single model
+            consensus_text = extract_from_zone(img_data['words'], zone_config)
+            _, normalized_text, is_valid, _, _ = process_extraction_result(
+                consensus_text, zone_config, field_name
+            )
+            vote_count, total_models = 1, 1
 
         # Render expandable for this image
         render_per_image_expandable(
             img_idx, img_data, consensus_text, normalized_text, is_valid,
-            vote_count, total_models, model_results, field_format, format_options,
-            zone_config.get('pattern', ''), field_name
+            vote_count, total_models, model_results_raw, field_format, format_options,
+            pattern, field_name
         )
 
 
@@ -1080,16 +1129,10 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
     expanded_y = (max(0, y_range[0] - expand_factor), min(1, y_range[1] + expand_factor))
     expanded_x = (max(0, x_range[0] - expand_factor), min(1, x_range[1] + expand_factor))
 
-    # Consensus pattern input with immediate application
-    consensus_pattern = st.text_input(
-        "Consensus Extract Pattern (press Enter to apply)",
-        value=zone_config.get('consensus_extract', ''),
-        placeholder="e.g., (?:ID|1D|10)[:\\s]*(\\d{8}) - Use capture group () to extract",
-        help="Regex pattern that searches each MODEL's expanded zone (+5%) first, then full document as fallback"
-    )
-    zone_config['consensus_extract'] = consensus_pattern
+    # Get consensus pattern from zone_config (set in Common Patterns section above)
+    consensus_pattern = zone_config.get('consensus_extract', '')
 
-    # Validate consensus pattern
+    # Validate consensus pattern and show info
     if consensus_pattern:
         from zone_operations import validate_consensus_pattern
         is_valid, error_msg = validate_consensus_pattern(consensus_pattern)
@@ -1121,7 +1164,7 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
     # Decide what to show based on whether pattern is entered
     if not consensus_pattern:
         # NO PATTERN: Show expanded zone outputs for pattern development
-        st.info("💡 Enter a consensus pattern above to test extraction. The outputs below show the expanded zone (+5%) text from each model to help you develop your pattern.")
+        st.info("💡 Enter a 'Consensus Extract' pattern in the Common Patterns section above to test extraction. The outputs below show the expanded zone (+5%) text from each model to help you develop your pattern.")
 
         all_expanded_outputs = []
         for img_data in st.session_state.images:
@@ -1139,30 +1182,63 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
 
         # Per-image expandables showing expanded zone content
         for img_idx, img_data in enumerate(st.session_state.images):
-            model_results = extract_from_zone_multimodel(
+            model_results_raw = extract_from_zone_multimodel(
                 img_data.get('ocr_result', {}), expanded_zone_config, img_data.get('words', [])
             )
 
-            # Calculate consensus
-            if model_results:
-                vote_counts = Counter(model_results.values())
-                consensus_text = vote_counts.most_common(1)[0][0] if vote_counts else ""
-                vote_count = vote_counts[consensus_text] if consensus_text else 0
-                total_models = len(model_results)
-            else:
-                consensus_text = extract_from_zone(img_data['words'], expanded_zone_config)
-                vote_count, total_models = 1, 1
+            # Prepare normalization settings
+            field_format = zone_config.get('format', 'string')
+            format_options = {}
+            if field_format == 'date':
+                format_options['date_format'] = zone_config.get('date_format', 'MM.DD.YYYY')
+            elif field_format == 'height':
+                format_options['height_format'] = zone_config.get('height_format', 'auto')
+            elif field_format == 'weight':
+                format_options['weight_format'] = zone_config.get('weight_format', 'auto')
 
-            # Process result: normalize, validate (cleanup already applied in extraction)
-            consensus_text, normalized_text, is_valid, field_format, format_options = process_extraction_result(
-                consensus_text, zone_config, field_name
-            )
+            pattern = zone_config.get('pattern', '')
+
+            # Normalize and validate each model's result BEFORE voting
+            if model_results_raw:
+                model_results_normalized = {}
+                for model_name, raw_text in model_results_raw.items():
+                    if raw_text:
+                        normalized = normalize_field(raw_text, field_format, field_name, **format_options)
+                        # Only include valid normalized results in voting
+                        if normalized and (not pattern or re.match(pattern, normalized)):
+                            model_results_normalized[model_name] = normalized
+
+                # Vote on NORMALIZED values
+                if model_results_normalized:
+                    vote_counts = Counter(model_results_normalized.values())
+                    normalized_text = vote_counts.most_common(1)[0][0]
+                    vote_count = vote_counts[normalized_text]
+                    total_models = len(model_results_normalized)
+                    # Find a raw text that normalized to the consensus (for display)
+                    consensus_text = next((raw for model, raw in model_results_raw.items()
+                                          if model in model_results_normalized
+                                          and model_results_normalized[model] == normalized_text), normalized_text)
+                    is_valid = True  # Already validated during normalization
+                else:
+                    # No valid normalized results
+                    normalized_text = None
+                    consensus_text = ""
+                    vote_count = 0
+                    total_models = len(model_results_raw)
+                    is_valid = False
+            else:
+                # Fallback to single model
+                consensus_text = extract_from_zone(img_data['words'], expanded_zone_config)
+                _, normalized_text, is_valid, _, _ = process_extraction_result(
+                    consensus_text, zone_config, field_name
+                )
+                vote_count, total_models = 1, 1
 
             # Render expandable for this image
             render_per_image_expandable(
                 img_idx, img_data, consensus_text, normalized_text, is_valid,
-                vote_count, total_models, model_results, field_format, format_options,
-                zone_config.get('pattern', ''), field_name
+                vote_count, total_models, model_results_raw, field_format, format_options,
+                pattern, field_name
             )
     else:
         # PATTERN ENTERED: Test pattern and show results
@@ -1179,18 +1255,12 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
 
         # Helper function to test pattern on text and apply cleanup to result
         def test_pattern_on_text(zone_text, full_text):
-            """Test pattern on zone text first, fallback to full text, then apply cleanup to extracted value"""
+            """Test pattern on zone text only (NO FALLBACK to full text)"""
             extracted_value = None
 
-            # Try expanded zone text first
+            # Try expanded zone text only (no fallback)
             if zone_text:
                 match = compiled_pattern.search(zone_text)
-                if match:
-                    extracted_value = match.group(1) if match.groups() else match.group(0)
-
-            # Fallback to full document text
-            if not extracted_value and full_text:
-                match = compiled_pattern.search(full_text)
                 if match:
                     extracted_value = match.group(1) if match.groups() else match.group(0)
 
@@ -1232,14 +1302,34 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
                 model_match = test_pattern_on_text(zone_text, full_text)
                 model_results[model_name] = model_match if model_match else ''
 
-            # Calculate consensus
-            non_empty_results = {k: v for k, v in model_results.items() if v}
-            if non_empty_results:
-                vote_counts = Counter(non_empty_results.values())
+            # Normalize and validate each model's result BEFORE voting
+            field_format = zone_config.get('format', 'string')
+            format_options = {}
+            if field_format == 'date':
+                format_options['date_format'] = zone_config.get('date_format', 'MM.DD.YYYY')
+            elif field_format == 'height':
+                format_options['height_format'] = zone_config.get('height_format', 'auto')
+            elif field_format == 'weight':
+                format_options['weight_format'] = zone_config.get('weight_format', 'auto')
+
+            pattern = zone_config.get('pattern', '')
+
+            model_results_normalized = {}
+            for model_name, raw_value in model_results.items():
+                if raw_value:
+                    normalized = normalize_field(raw_value, field_format, field_name, **format_options)
+                    # Only include valid normalized results in voting
+                    if normalized and (not pattern or re.match(pattern, normalized)):
+                        model_results_normalized[model_name] = normalized
+
+            # Vote on NORMALIZED values
+            if model_results_normalized:
+                vote_counts = Counter(model_results_normalized.values())
                 consensus_match = vote_counts.most_common(1)[0][0]
                 vote_count = vote_counts[consensus_match]
+                total_models = len(model_results_normalized)
             else:
-                consensus_match, vote_count = None, 0
+                consensus_match, vote_count, total_models = None, 0, len(model_results)
 
             # Store results for this image
             all_image_results.append({
@@ -1248,7 +1338,7 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
                 'model_results': model_results,
                 'consensus_match': consensus_match,
                 'vote_count': vote_count,
-                'total_models': len(model_results)
+                'total_models': total_models
             })
 
         # Copy all pattern outputs button
@@ -1559,31 +1649,28 @@ def process_test_images_and_extract(test_files, api_url):
                                 
                                 # Extract expanded zone text for this model
                                 expanded_zone_text = extract_from_zone(model_words_with_geometry, expanded_zone_config)
-                                full_text = model_data.get('raw_text', '')
-                                
-                                # Test pattern on expanded zone first, then full document (like Build Mode)
+
+                                # Test pattern on expanded zone ONLY (NO fallback to full document)
                                 extracted_value = ""
-                                for search_text in [expanded_zone_text, full_text]:
-                                    if search_text and not extracted_value:
-                                        try:
-                                            match = re.search(consensus_pattern, search_text, re.IGNORECASE | re.MULTILINE)
-                                            if match:
-                                                if match.lastindex and match.lastindex >= 1:
-                                                    # Has capturing group
-                                                    extracted_value = match.group(1).strip()
-                                                else:
-                                                    # No capturing group, use full match
-                                                    extracted_value = match.group(0).strip()
-                                                
-                                                # Apply cleanup to extracted value (not search text)
-                                                if cleanup_pattern and extracted_value:
-                                                    try:
-                                                        extracted_value = re.sub(cleanup_pattern, '', extracted_value, flags=re.IGNORECASE).strip()
-                                                    except:
-                                                        pass
-                                                break  # Found match, stop searching
-                                        except:
-                                            continue
+                                if expanded_zone_text:
+                                    try:
+                                        match = re.search(consensus_pattern, expanded_zone_text, re.IGNORECASE | re.MULTILINE)
+                                        if match:
+                                            if match.lastindex and match.lastindex >= 1:
+                                                # Has capturing group
+                                                extracted_value = match.group(1).strip()
+                                            else:
+                                                # No capturing group, use full match
+                                                extracted_value = match.group(0).strip()
+
+                                            # Apply cleanup to extracted value (not search text)
+                                            if cleanup_pattern and extracted_value:
+                                                try:
+                                                    extracted_value = re.sub(cleanup_pattern, '', extracted_value, flags=re.IGNORECASE).strip()
+                                                except:
+                                                    pass
+                                    except:
+                                        pass
                                 
                                 pattern_model_results[model_name] = extracted_value
                             

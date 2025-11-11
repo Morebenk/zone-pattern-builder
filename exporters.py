@@ -16,10 +16,13 @@ def clean_zone_config(zone_config: Dict[str, Any]) -> Dict[str, Any]:
 
     Keeps only keys that are valid in template FIELD_ZONES
     """
-    # Core keys that always appear
+    # Core keys that always appear - ensure they're tuples
+    y_range = zone_config['y_range']
+    x_range = zone_config['x_range']
+
     clean = {
-        'y_range': zone_config['y_range'],
-        'x_range': zone_config['x_range'],
+        'y_range': tuple(y_range) if isinstance(y_range, (list, tuple)) else y_range,
+        'x_range': tuple(x_range) if isinstance(x_range, (list, tuple)) else x_range,
     }
 
     # Format and format-specific keys
@@ -160,9 +163,14 @@ def export_to_python(zones: Dict[str, Dict[str, Any]], metadata: Dict[str, Any] 
 
         lines.append(f"        '{field_name}': {{")
 
-        # Always include coordinates first
-        lines.append(f"            'y_range': {clean['y_range']},")
-        lines.append(f"            'x_range': {clean['x_range']},")
+        # Always include coordinates first - ensure they're formatted as tuples
+        y_range = clean['y_range']
+        x_range = clean['x_range']
+        # Convert to tuple if list, keep as tuple if already tuple
+        y_tuple = tuple(y_range) if isinstance(y_range, (list, tuple)) else y_range
+        x_tuple = tuple(x_range) if isinstance(x_range, (list, tuple)) else x_range
+        lines.append(f"            'y_range': {y_tuple},")
+        lines.append(f"            'x_range': {x_tuple},")
 
         # Format and format-specific keys
         if 'format' in clean:
