@@ -7,7 +7,95 @@ system so the zone builder can show the actual final output that will be produce
 """
 
 import re
-from typing import Optional
+from enum import Enum
+from typing import Optional, List
+
+
+# --- Enums Provided by User ---
+
+class EyeColor(Enum):
+    """Eye color categories as defined in AAMVA standard."""
+    BLACK = "BLK"
+    BLUE = "BLU"
+    BROWN = "BRO" # Note: AAMVA standard is BRO, but data often has BRN.
+    GRAY = "GRY"
+    GREEN = "GRN"
+    HAZEL = "HAZ"
+    MAROON = "MAR"
+    PINK = "PNK"
+    DICHROMATIC = "DIC"
+    UNKNOWN = "UNK"
+    # Adding BRN as it's extremely common in your examples
+    BROWN_ALT = "BRN"
+
+
+class HairColor(Enum):
+    """Hair color categories as defined in AAMVA standard."""
+    BALD = "BAL"
+    BLACK = "BLK"
+    BLOND = "BLN"
+    BROWN = "BRO"
+    GRAY = "GRY"
+    RED = "RED"
+    SANDY = "SDY"
+    WHITE = "WHI"
+    UNKNOWN = "UNK"
+    # Adding BRN as it's common
+    BROWN_ALT = "BRN"
+
+
+# --- Pre-compiled Regex Patterns for Performance ---
+
+# Create lists of valid color codes directly from the Enums
+VALID_EYE_COLORS: List[str] = [e.value for e in EyeColor]
+VALID_HAIR_COLORS: List[str] = [h.value for h in HairColor]
+
+# Create regex patterns to find *only* these valid codes
+# We use \b (word boundary) to avoid matching "BRO" inside "BROWN" (if "BROWN" wasn't a code)
+# We join all valid codes with an OR | operator
+EYE_COLOR_PATTERN = re.compile(r'\b(' + '|'.join(VALID_EYE_COLORS) + r')\b')
+HAIR_COLOR_PATTERN = re.compile(r'\b(' + '|'.join(VALID_HAIR_COLORS) + r')\b')
+
+
+def _extract_color_after_label(
+    text: str, label: str, color_pattern: re.Pattern
+) -> Optional[str]:
+    """
+    Generic helper to find a color code that appears after a specific label.
+
+    Args:
+        text: The raw input string.
+        label: The label to search for (e.g., "EYES", "HAIR").
+        color_pattern: The compiled regex pattern containing valid color codes.
+
+    Returns:
+        The first valid color code found after the label, or None.
+    """
+    if not text:
+        return None
+
+    # Standardize to uppercase
+    upper_text = text.upper().strip()
+
+    # Find the position of the label (e.g., "EYES")
+    label_pos = upper_text.find(label)
+
+    # If the label doesn't exist, we can't find the color
+    if label_pos == -1:
+        return None
+
+    # Create a new string starting *after* the label
+    # This ensures "HAIR BLK EYES BRN" won't find "BLK" for "EYES"
+    search_text = upper_text[label_pos + len(label):]
+
+    # Find the *first* match for a valid color in the new string
+    match = color_pattern.search(search_text)
+
+    if match:
+        # Return the matched group (e.g., "BLK", "BRN")
+        return match.group(1)
+
+    return None
 
 
 # ============================================================================
@@ -223,42 +311,35 @@ def normalize_sex(value: str) -> Optional[str]:
 
 def normalize_eye_color(value: str) -> Optional[str]:
     """
-    Extract eye color from text using regex pattern (no normalization)
-
-    Just extracts the eye color code exactly as it appears on the document.
-    Works like height extraction: "18. Eyes: BRO" → "BRO"
+    Extracts the AAMVA eye color code (BLK, BLU, BRN, etc.) that
+    appears after the "EYES" label in a string.
 
     Args:
-        value: Raw eye color string from OCR
+        value: Raw string from OCR
 
     Returns:
-        Eye color code as found in document, or None if not found
-
-    Examples:
-        normalize_eye_color("BRO") → "BRO"
-        normalize_eye_color("18. Eyes: BRN") → "BRN"
-        normalize_eye_color("EYES: BLUE") → "BLUE"
+        The 3-letter eye color code, or None if not found.
     """
-    if not value:
-        return None
+    # I added "BRN" to your EyeColor Enum as it was in all your examples
+    return _extract_color_after_label(value, "EYES", EYE_COLOR_PATTERN)
 
-    text = value.upper().strip()
 
-    # Extract 2-3 letter eye color codes (most common on IDs)
-    # Pattern: word boundary + 2-3 uppercase letters + word boundary
-    match = re.search(r'\b([A-Z]{2,3})\b', text)
-    if match:
-        code = match.group(1)
-        # Only return if it looks like an eye color code (2-3 letters, all caps)
-        if 2 <= len(code) <= 3:
-            return code
+# ============================================================================
+# HAIR COLOR NORMALIZATION (from app/field_extraction/hybrid_template.py)
+# ============================================================================
 
-    # Fallback: extract full words like BLUE, BROWN, GREEN, etc.
-    match = re.search(r'\b([A-Z]{4,6})\b', text)
-    if match:
-        return match.group(1)
+def normalize_hair_color(value: str) -> Optional[str]:
+    """
+    Extracts the AAMVA hair color code (BLK, BLN, BRO, etc.) that
+    appears after the "HAIR" label in a string.
 
-    return None
+    Args:
+        value: Raw string from OCR
+
+    Returns:
+        The 3-letter hair color code, or None if not found.
+    """
+    return _extract_color_after_label(value, "HAIR", HAIR_COLOR_PATTERN)
 
 
 # ============================================================================
@@ -393,6 +474,9 @@ def normalize_field(value: str, field_format: str, field_name: Optional[str] = N
 
     elif field_format == 'eyes':
         value = normalize_eye_color(value)
+
+    elif field_format == 'hair':
+        value = normalize_hair_color(value)
 
     elif field_format == 'height':
         height_format = format_options.get('height_format', 'auto')

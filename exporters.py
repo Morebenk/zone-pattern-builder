@@ -54,7 +54,7 @@ def clean_zone_config(zone_config: Dict[str, Any]) -> Dict[str, Any]:
         # AUTO-ADD consensus_extract for normalized fields
         # These fields use normalizers that extract values from messy text
         field_format = zone_config.get('format')
-        if field_format in ['height', 'sex', 'eyes', 'weight']:
+        if field_format in ['height', 'sex', 'eyes', 'hair', 'weight']:
             clean['consensus_extract'] = r".*"  # Match any text, let normalizer handle extraction
 
     # Clustering keys
