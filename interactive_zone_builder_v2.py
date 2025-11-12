@@ -554,6 +554,10 @@ def render_build_mode():
                 zone_config['pattern'] = r'^[A-Z]{2,6}$'
                 st.info("Pattern: ^[A-Z]{2,6}$ (extracts as-is)")
 
+            elif field_format == 'hair':
+                zone_config['pattern'] = r'^[A-Z]{2,6}$'
+                st.info("Pattern: ^[A-Z]{2,6}$ (extracts as-is)")
+
         # Common patterns (shared by both extraction methods)
         st.divider()
         st.markdown("### 🔧 Common Extraction Patterns")
@@ -1569,7 +1573,7 @@ def process_test_images_and_extract(test_files, api_url):
                     working_zone_config = zone_config.copy()
                     if not working_zone_config.get('consensus_extract'):
                         field_format = working_zone_config.get('format')
-                        if field_format in ['height', 'sex', 'eyes', 'weight']:
+                        if field_format in ['height', 'sex', 'eyes', 'hair', 'weight']:
                             working_zone_config['consensus_extract'] = r".*"  # Match any text, let normalizer handle extraction
                     
                     # TEST BOTH EXTRACTION METHODS SEPARATELY

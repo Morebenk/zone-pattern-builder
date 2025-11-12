@@ -20,6 +20,7 @@ FIELD_FORMATS = [
     'weight',     # Weight values (US/metric)
     'sex',        # Gender/sex values (M/F)
     'eyes',       # Eye color values (extracts as-is: BRO, BRN, BLU, BLUE, etc.)
+    'hair',       # Hair color values (extracts as-is: BLK, BRO, BRN, BLN, etc.)
     'number',     # Numeric/code fields
 ]
 
@@ -81,6 +82,7 @@ def get_format_help_text(field_format: str) -> str:
         'weight': 'Weight values - normalized to US (150lb) or metric (68kg) format',
         'sex': 'Gender/sex values - normalized to M or F',
         'eyes': 'Eye color values - extracts code as-is from document (BRO, BRN, BLU, etc.)',
+        'hair': 'Hair color values - extracts code as-is from document (BLK, BRO, BRN, BLN, etc.)',
         'number': 'Numeric/code fields - uppercase alphanumeric',
     }
     return help_texts.get(field_format, '')
@@ -130,7 +132,7 @@ def auto_detect_format(field_name: str) -> str:
         field_name: The name of the field
 
     Returns:
-        Detected format type (date, height, weight, sex, eyes, or string as default)
+        Detected format type (date, height, weight, sex, eyes, hair, or string as default)
 
     Examples:
         auto_detect_format("date_of_birth") → "date"
@@ -138,6 +140,7 @@ def auto_detect_format(field_name: str) -> str:
         auto_detect_format("height") → "height"
         auto_detect_format("sex") → "sex"
         auto_detect_format("eyes") → "eyes"
+        auto_detect_format("hair") → "hair"
         auto_detect_format("first_name") → "string"
     """
     field_lower = field_name.lower()
@@ -162,9 +165,9 @@ def auto_detect_format(field_name: str) -> str:
     if 'eye' in field_lower or field_lower in ['eyes', 'eye_color', 'eye_colour']:
         return 'eyes'
 
-    # Hair color fields (string, no special processing)
-    if 'hair' in field_lower:
-        return 'string'
+    # Hair color fields
+    if 'hair' in field_lower or field_lower in ['hair', 'hair_color', 'hair_colour']:
+        return 'hair'
 
     # Number/code fields
     if any(keyword in field_lower for keyword in ['number', 'code', 'dl', 'license']):
