@@ -1153,7 +1153,7 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
     # Cleanup toggle
     apply_cleanup = st.checkbox(
         "Apply cleanup pattern to extracted value",
-        value=False,
+        value=True,  # Default ON to match Test Mode behavior
         key=f"apply_cleanup_{field_name}",
         help="Apply cleanup pattern to the value extracted by consensus pattern (e.g., remove remaining labels)"
     )
@@ -1588,21 +1588,52 @@ def process_test_images_and_extract(test_files, api_url):
                         words
                     )
                     
-                    # Get zone-based consensus
+                    # Normalize and validate EACH model's zone result BEFORE voting (like Build Mode & Production)
+                    field_format = working_zone_config.get('format', 'string')
+                    format_options = {}
+                    if field_format == 'date':
+                        format_options['date_format'] = working_zone_config.get('date_format', 'MM.DD.YYYY')
+                    elif field_format == 'height':
+                        format_options['height_format'] = working_zone_config.get('height_format', 'auto')
+                    elif field_format == 'weight':
+                        format_options['weight_format'] = working_zone_config.get('weight_format', 'auto')
+
+                    validation_pattern = working_zone_config.get('pattern', '')
+
                     if zone_model_results:
-                        zone_vote_counts = Counter(zone_model_results.values())
-                        zone_consensus_text = zone_vote_counts.most_common(1)[0][0] if zone_vote_counts else ""
-                        zone_vote_count = zone_vote_counts[zone_consensus_text] if zone_consensus_text else 0
-                        zone_total_models = len(zone_model_results)
+                        # Normalize each model's zone text
+                        zone_model_results_normalized = {}
+                        for model_name, raw_zone_text in zone_model_results.items():
+                            if raw_zone_text:
+                                normalized = normalize_field(raw_zone_text, field_format, field_name, **format_options)
+                                # Only include valid normalized results in voting
+                                if normalized and (not validation_pattern or re.match(validation_pattern, normalized)):
+                                    zone_model_results_normalized[model_name] = normalized
+
+                        # Vote on NORMALIZED values (like Build Mode & Production)
+                        if zone_model_results_normalized:
+                            zone_vote_counts = Counter(zone_model_results_normalized.values())
+                            zone_consensus_text = zone_vote_counts.most_common(1)[0][0] if zone_vote_counts else ""
+                            zone_vote_count = zone_vote_counts[zone_consensus_text] if zone_consensus_text else 0
+                            zone_total_models = len(zone_model_results_normalized)
+
+                            # Winner is already normalized!
+                            zone_normalized_text = zone_consensus_text
+                            zone_is_valid = bool(zone_normalized_text)
+                        else:
+                            # No valid normalized results
+                            zone_consensus_text = ""
+                            zone_normalized_text = ""
+                            zone_is_valid = False
+                            zone_vote_count = 0
+                            zone_total_models = len(zone_model_results)
                     else:
+                        # Single model fallback
                         zone_consensus_text = extract_from_zone(words, zone_config_pure)
+                        zone_normalized_text = normalize_field(zone_consensus_text, field_format, field_name, **format_options) if zone_consensus_text else ""
+                        zone_is_valid = bool(zone_normalized_text) and (not validation_pattern or bool(re.match(validation_pattern, zone_normalized_text)))
                         zone_vote_count, zone_total_models = 1, 1
                         zone_model_results = {"single": zone_consensus_text}
-                    
-                    # Process zone result
-                    zone_processed_text, zone_normalized_text, zone_is_valid, field_format, format_options = process_extraction_result(
-                        zone_consensus_text, working_zone_config, field_name
-                    )
                     
                     # 2. PATTERN-BASED EXTRACTION (pure pattern, if consensus_extract exists)
                     pattern_results = {}
@@ -1627,32 +1658,23 @@ def process_test_images_and_extract(test_files, api_url):
                             y_min, y_max = working_zone_config['y_range']
                             x_min, x_max = working_zone_config['x_range']
                             expand_factor = 0.05  # 5% expansion like Build Mode
-                            
+
                             expanded_y = (max(0, y_min - expand_factor), min(1, y_max + expand_factor))
                             expanded_x = (max(0, x_min - expand_factor), min(1, x_max + expand_factor))
-                            
+
                             expanded_zone_config = working_zone_config.copy()
                             expanded_zone_config['y_range'] = expanded_y
                             expanded_zone_config['x_range'] = expanded_x
                             expanded_zone_config['cleanup_pattern'] = ''  # Don't apply cleanup to zone text
-                            
+
+                            # Use extract_from_zone_multimodel like Build Mode (correct approach!)
+                            model_expanded_zone_results = extract_from_zone_multimodel(
+                                ocr_result, expanded_zone_config, words
+                            )
+
                             for model_name, model_data in per_model_outputs.items():
-                                # Get this model's word list
-                                model_words = model_data.get('words', [])
-                                if not model_words or len(model_words) != len(words):
-                                    pattern_model_results[model_name] = ""
-                                    continue
-                                
-                                # Build model-specific words with geometry (reuse consensus geometry, swap text)
-                                model_words_with_geometry = []
-                                for i, consensus_word in enumerate(words):
-                                    if i < len(model_words):
-                                        model_word_with_geom = consensus_word.copy()
-                                        model_word_with_geom['text'] = model_words[i]
-                                        model_words_with_geometry.append(model_word_with_geom)
-                                
-                                # Extract expanded zone text for this model
-                                expanded_zone_text = extract_from_zone(model_words_with_geometry, expanded_zone_config)
+                                # Get expanded zone text for this model
+                                expanded_zone_text = model_expanded_zone_results.get(model_name, '')
 
                                 # Test pattern on expanded zone ONLY (NO fallback to full document)
                                 extracted_value = ""
@@ -1677,18 +1699,45 @@ def process_test_images_and_extract(test_files, api_url):
                                         pass
                                 
                                 pattern_model_results[model_name] = extracted_value
-                            
-                            # Get pattern consensus
-                            if pattern_model_results:
-                                pattern_vote_counts = Counter(pattern_model_results.values())
+
+                            # Normalize and validate EACH model's result BEFORE voting (like Build Mode & Production)
+                            field_format = working_zone_config.get('format', 'string')
+                            format_options = {}
+                            if field_format == 'date':
+                                format_options['date_format'] = working_zone_config.get('date_format', 'MM.DD.YYYY')
+                            elif field_format == 'height':
+                                format_options['height_format'] = working_zone_config.get('height_format', 'auto')
+                            elif field_format == 'weight':
+                                format_options['weight_format'] = working_zone_config.get('weight_format', 'auto')
+
+                            validation_pattern = working_zone_config.get('pattern', '')
+
+                            pattern_model_results_normalized = {}
+                            for model_name, raw_value in pattern_model_results.items():
+                                if raw_value:
+                                    # Normalize each model's value
+                                    normalized = normalize_field(raw_value, field_format, field_name, **format_options)
+                                    # Only include valid normalized results in voting
+                                    if normalized and (not validation_pattern or re.match(validation_pattern, normalized)):
+                                        pattern_model_results_normalized[model_name] = normalized
+
+                            # Vote on NORMALIZED values (like Build Mode & Production)
+                            if pattern_model_results_normalized:
+                                pattern_vote_counts = Counter(pattern_model_results_normalized.values())
                                 pattern_consensus_text = pattern_vote_counts.most_common(1)[0][0] if pattern_vote_counts else ""
                                 pattern_vote_count = pattern_vote_counts[pattern_consensus_text] if pattern_consensus_text else 0
+                                pattern_total_models = len(pattern_model_results_normalized)
+
+                                # Winner is already normalized!
+                                pattern_normalized_text = pattern_consensus_text
+                                pattern_is_valid = bool(pattern_normalized_text)
+                            else:
+                                # No valid normalized results
+                                pattern_consensus_text = ""
+                                pattern_normalized_text = ""
+                                pattern_is_valid = False
+                                pattern_vote_count = 0
                                 pattern_total_models = len(pattern_model_results)
-                                
-                                # Process pattern result
-                                pattern_processed_text, pattern_normalized_text, pattern_is_valid, _, _ = process_extraction_result(
-                                    pattern_consensus_text, working_zone_config, field_name
-                                )
                     
                     # Store results for BOTH methods
                     field_results[field_name] = {
@@ -1821,12 +1870,11 @@ def render_test_results():
                             # Zone-based extraction column
                             with col1:
                                 st.markdown(f"**🎯 Zone-Based Extraction** {zone_status}")
-                                
+
+                                # Display with arrow notation like Build Mode
                                 if field_result['zone_normalized'] != field_result['zone_raw_consensus'] and field_result['zone_normalized']:
-                                    st.text("Raw extracted:")
-                                    st.code(field_result['zone_raw_consensus'] or "(empty)")
-                                    st.text("After normalization:")
-                                    st.code(field_result['zone_normalized'])
+                                    consensus_display = f"{field_result['zone_raw_consensus'] or '(empty)'} → {field_result['zone_normalized']}"
+                                    st.code(consensus_display)
                                 else:
                                     st.code(field_result['zone_raw_consensus'] or "(empty)")
                                 
@@ -1836,16 +1884,30 @@ def render_test_results():
                                 if len(field_result['zone_model_results']) > 1:
                                     st.markdown("**Per-model zone results:**")
                                     for model_name, model_text in field_result['zone_model_results'].items():
+                                        # Normalize like Build Mode does (use normalize_field imported at top)
+                                        model_normalized = normalize_field(
+                                            model_text,
+                                            field_result['field_format'],
+                                            field_name,
+                                            **field_result['format_options']
+                                        ) if model_text else None
+
                                         color = "#28a745" if model_text == field_result['zone_raw_consensus'] else "#6c757d"
                                         status = "🏆" if model_text == field_result['zone_raw_consensus'] else "📝"
-                                        
+
+                                        # Show arrow notation if normalized differs from raw (like Build Mode)
+                                        if model_text and model_text != model_normalized and model_normalized:
+                                            display = f"{model_text} → {model_normalized}"
+                                        else:
+                                            display = model_text or '(empty)'
+
                                         st.markdown(f"""
                                         <div style="margin: 2px 0; padding: 2px 6px; background: {color}15; border-left: 2px solid {color}; border-radius: 3px;">
                                             <span style="color: {color}; font-weight: bold; font-size: 12px;">
                                                 {status} {model_name.upper()}:
                                             </span>
                                             <span style="color: #333; margin-left: 4px; font-family: monospace; font-size: 12px;">
-                                                {model_text or '(empty)'}
+                                                {display}
                                             </span>
                                         </div>
                                         """, unsafe_allow_html=True)
@@ -1853,12 +1915,11 @@ def render_test_results():
                             # Pattern-based extraction column
                             with col2:
                                 st.markdown(f"**🔍 Pattern-Based Extraction** {pattern_status}")
-                                
+
+                                # Display with arrow notation like Build Mode
                                 if field_result['pattern_normalized'] != field_result['pattern_raw_consensus'] and field_result['pattern_normalized']:
-                                    st.text("Raw extracted:")
-                                    st.code(field_result['pattern_raw_consensus'] or "(empty)")
-                                    st.text("After normalization:")
-                                    st.code(field_result['pattern_normalized'])
+                                    consensus_display = f"{field_result['pattern_raw_consensus'] or '(empty)'} → {field_result['pattern_normalized']}"
+                                    st.code(consensus_display)
                                 else:
                                     st.code(field_result['pattern_raw_consensus'] or "(empty)")
                                 
@@ -1871,16 +1932,30 @@ def render_test_results():
                                 if len(field_result['pattern_model_results']) > 1:
                                     st.markdown("**Per-model pattern results:**")
                                     for model_name, model_text in field_result['pattern_model_results'].items():
+                                        # Normalize like Build Mode does (use normalize_field imported at top)
+                                        model_normalized = normalize_field(
+                                            model_text,
+                                            field_result['field_format'],
+                                            field_name,
+                                            **field_result['format_options']
+                                        ) if model_text else None
+
                                         color = "#28a745" if model_text == field_result['pattern_raw_consensus'] else "#6c757d"
                                         status = "🏆" if model_text == field_result['pattern_raw_consensus'] else "📝"
-                                        
+
+                                        # Show arrow notation if normalized differs from raw (like Build Mode)
+                                        if model_text and model_text != model_normalized and model_normalized:
+                                            display = f"{model_text} → {model_normalized}"
+                                        else:
+                                            display = model_text or '(empty)'
+
                                         st.markdown(f"""
                                         <div style="margin: 2px 0; padding: 2px 6px; background: {color}15; border-left: 2px solid {color}; border-radius: 3px;">
                                             <span style="color: {color}; font-weight: bold; font-size: 12px;">
                                                 {status} {model_name.upper()}:
                                             </span>
                                             <span style="color: #333; margin-left: 4px; font-family: monospace; font-size: 12px;">
-                                                {model_text or '(empty)'}
+                                                {display}
                                             </span>
                                         </div>
                                         """, unsafe_allow_html=True)
@@ -1894,12 +1969,11 @@ def render_test_results():
                             # Zone-only field
                             st.markdown(f"**🎯 Zone-Based Extraction Only** {zone_status}")
                             st.info("💡 No pattern configured - add `consensus_extract` pattern for fallback extraction")
-                            
+
+                            # Display with arrow notation like Build Mode
                             if field_result['zone_normalized'] != field_result['zone_raw_consensus'] and field_result['zone_normalized']:
-                                st.text("Raw extracted:")
-                                st.code(field_result['zone_raw_consensus'] or "(empty)")
-                                st.text("After normalization:")
-                                st.code(field_result['zone_normalized'])
+                                consensus_display = f"{field_result['zone_raw_consensus'] or '(empty)'} → {field_result['zone_normalized']}"
+                                st.code(consensus_display)
                             else:
                                 st.code(field_result['zone_raw_consensus'] or "(empty)")
                             
@@ -1909,16 +1983,30 @@ def render_test_results():
                             if len(field_result['zone_model_results']) > 1:
                                 st.markdown("**Per-model zone results:**")
                                 for model_name, model_text in field_result['zone_model_results'].items():
+                                    # Normalize like Build Mode does (use normalize_field imported at top)
+                                    model_normalized = normalize_field(
+                                        model_text,
+                                        field_result['field_format'],
+                                        field_name,
+                                        **field_result['format_options']
+                                    ) if model_text else None
+
                                     color = "#28a745" if model_text == field_result['zone_raw_consensus'] else "#6c757d"
                                     status = "🏆" if model_text == field_result['zone_raw_consensus'] else "📝"
-                                    
+
+                                    # Show arrow notation if normalized differs from raw (like Build Mode)
+                                    if model_text and model_text != model_normalized and model_normalized:
+                                        display = f"{model_text} → {model_normalized}"
+                                    else:
+                                        display = model_text or '(empty)'
+
                                     st.markdown(f"""
                                     <div style="margin: 2px 0; padding: 2px 6px; background: {color}15; border-left: 2px solid {color}; border-radius: 3px;">
                                         <span style="color: {color}; font-weight: bold; font-size: 12px;">
                                             {status} {model_name.upper()}:
                                         </span>
                                         <span style="color: #333; margin-left: 4px; font-family: monospace; font-size: 12px;">
-                                            {model_text or '(empty)'}
+                                            {display}
                                         </span>
                                     </div>
                                     """, unsafe_allow_html=True)
