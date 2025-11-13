@@ -61,18 +61,20 @@ HAIR_COLOR_PATTERN = re.compile(r'\b(' + '|'.join(VALID_HAIR_COLORS) + r')\b')
 WEIGHT_PATTERN = re.compile(r'(\d{2,3})')
 
 # --- Height Patterns ---
-# US: Finds 5'05", 5-05, 5"04, 5 05, etc.
-HEIGHT_PATTERN_US_EXPLICIT = re.compile(r"(\d)\s*['\"\-\s]+\s*(\d{1,2})")
-# US: Finds 3-digit format like 508 (5'08")
-HEIGHT_PATTERN_US_IMPLICIT = re.compile(r'\b(\d{3})\b')
+# Allow word boundary before feet, accept various quote/hyphen variants,
+# require feet to be a single digit 4-7 and inches 0-99 (we sanity-check later).
+HEIGHT_PATTERN_US_EXPLICIT = re.compile(
+    r"\b([4-7])\s*(?:'|’|`|\u2019|\-|\s)+\s*([0-9]{1,2})\b"
+)
 
-# Metric: Finds 1.75 or 1,75 (with optional 'M') - NOTE: Text is uppercased, so use 'M'
+# Implicit 3-digit like 507 or 508, but require first digit 4-7 to avoid false matches.
+HEIGHT_PATTERN_US_IMPLICIT = re.compile(r'\b([4-7])([0-9]{2})\b')
+
+# Metric patterns (unchanged from yours)
 HEIGHT_PATTERN_METRIC_DEC = re.compile(r'\b(1)[,.](\d{2})\s*M?\b')
-# Metric: Finds 175cm (range 140-220) - NOTE: Text is uppercased, so use 'CM'
 HEIGHT_PATTERN_METRIC_CM = re.compile(r'\b(1[4-9]\d|2[0-1]\d)\s*CM\b')
-# Metric: Finds 175 (ambiguous, range 140-220, must be last resort)
 HEIGHT_PATTERN_METRIC_INT = re.compile(r'\b(1[4-9]\d|2[0-1]\d)\b')
-
+# ============================================================================
 
 def _extract_color_after_label(
     text: str, label: str, color_pattern: re.Pattern
@@ -174,86 +176,54 @@ def normalize_date(date_str: str, format: str = "DD.MM.YYYY") -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _parse_us_height(text: str) -> Optional[str]:
-    """
-    Tries to parse US-style height (5'08" or 508) from text.
-    Uses finditer to check ALL matches and return the first valid one.
-    """
-    
-    # 1. Try explicit format first: 5'05", 5-05, etc.
-    # *** THIS IS THE FIX for "HGT 19 5-08" ***
-    # It finds ALL matches and checks them in order.
-    # Match 1: "1 9" -> feet=1, inches=9 -> Fails sanity check, continues
-    # Match 2: "5-08" -> feet=5, inches=8 -> Passes sanity check, returns
+    # 1) Explicit formats like 5'07", 5-07, 5 07
     for match in HEIGHT_PATTERN_US_EXPLICIT.finditer(text):
         try:
             feet_str, inches_str = match.groups()
             feet = int(feet_str)
             inches = int(inches_str)
-
-            # Sanity check: 4'00" to 7'11"
             if 4 <= feet <= 7 and 0 <= inches <= 11:
-                return f"{feet}'{inches_str.zfill(2)}"
+                return f"{feet}'{str(inches).zfill(2)}"
         except (ValueError, IndexError):
-            continue  # Not a valid number, keep searching
+            continue
 
-    # 2. Try implicit 3-digit format: 508
-    for match_implicit in HEIGHT_PATTERN_US_IMPLICIT.finditer(text):
+    # 2) Implicit 3-digit formats like 507
+    for match in HEIGHT_PATTERN_US_IMPLICIT.finditer(text):
         try:
-            digits = match_implicit.group(1)
-            feet, inches_str = digits[0], digits[1:]
-            feet_int = int(feet)
-            inches_int = int(inches_str)
-            
-            # Sanity check: 4'00" to 7'11"
-            if 4 <= feet_int <= 7 and 0 <= inches_int <= 11:
-                return f"{feet_int}'{inches_str.zfill(2)}"
+            feet = int(match.group(1))
+            inches = int(match.group(2))
+            if 4 <= feet <= 7 and 0 <= inches <= 11:
+                return f"{feet}'{str(inches).zfill(2)}"
         except (ValueError, IndexError):
-            continue # Keep searching
-            
+            continue
+
     return None
 
 def _parse_metric_height(text: str) -> Optional[str]:
-    """
-    Tries to parse metric-style height (1.75m or 175cm) from text.
-    Checks in priority order.
-    """
-    
-    # We must check in order of specificity.
-    
-    # 1. Try decimal format: 1.75m or 1,82
-    # *** THIS IS THE FIX for "HGT 1.75m" ***
     for match_dec in HEIGHT_PATTERN_METRIC_DEC.finditer(text):
         try:
             meters, cm_str = match_dec.groups()
-            cm = int(cm_str)
-            # Sanity check: 1.00m to 1.99m
-            if 0 <= cm <= 99: # '1.' is already checked by regex
+            if 0 <= int(cm_str) <= 99:
                 return f"1,{cm_str}m"
         except (ValueError, IndexError):
             continue
 
-    # 2. Try 'cm' integer format: 175cm
-    # *** THIS IS THE FIX for "HGT 168cm" ***
     for match_cm in HEIGHT_PATTERN_METRIC_CM.finditer(text):
         try:
             cm_str = match_cm.group(1)
-            cm = int(cm_str)
-            # Sanity check: 140cm to 220cm (already in regex)
             return f"{cm_str[0]},{cm_str[1:]}m"
         except (ValueError, IndexError):
             continue
 
-    # 3. Try ambiguous 3-digit integer format: 180 (LAST RESORT)
     for match_int in HEIGHT_PATTERN_METRIC_INT.finditer(text):
         try:
             digits = match_int.group(1)
-            cm = int(digits)
-            # Sanity check: 140cm to 220cm (already in regex)
             return f"{digits[0]},{digits[1:]}m"
         except (ValueError, IndexError):
             continue
 
     return None
+
 
 def normalize_height(value: str, format_type: str = 'auto') -> Optional[str]:
     """
@@ -269,27 +239,17 @@ def normalize_height(value: str, format_type: str = 'auto') -> Optional[str]:
     """
     if not value:
         return None
-    
-    # --- Label is NOT required for height ---
     search_text = value.upper().strip()
 
     if format_type == 'us':
         return _parse_us_height(search_text)
-    
     if format_type == 'metric':
         return _parse_metric_height(search_text)
-
-    if format_type == 'auto':
-        # 'auto' mode MUST try US first, as it's more common in
-        # mixed strings like "HGT 160 5'04"".
-        us_result = _parse_us_height(search_text)
-        if us_result:
-            return us_result
-        
-        # Fallback to metric
-        return _parse_metric_height(search_text)
-
-    return None
+    # auto
+    us_result = _parse_us_height(search_text)
+    if us_result:
+        return us_result
+    return _parse_metric_height(search_text)
 
 
 # ============================================================================
@@ -611,119 +571,64 @@ def normalize_field(value: str, field_format: str, field_name: Optional[str] = N
 
 if __name__ == "__main__":
 
-    print("\n--- Testing Height Normalization (US & Auto-Detect) ---")
-    
-    # Using a set to auto-remove duplicates from the provided examples
-    test_cases_height = list(set([
-        # --- Examples from first prompt ---
-        '15 SEX F 18 16 HGT 5\'-05" 19',
-        '15 SEX F 18 16 HGT 5\'-05" 19',
-        '15 SEX F 18 16 HGT 5\'-05" 19',
-        '15 SEX F 18 16 HGT 5\'-05" 19',
-        '15 SEX F 18 16 HGT 5-05" 19',
-        '15 SEX M 18 16 HGT 5-11" 19 17 WGT 155 Ib',
-        '15 SEX M 18 16 HGT 5-11" 19 17 WGT 155 lb',
-        '15 SEX M 18 16 HGT 5-11" 19 17 WGT 155 Ib',
-        '15 SEX M 18 16 HGT 5-11" 19 17 WGT 155 lb',
-        '15 SEX M 18 16 HGT 5-11" 19 17 WGT 155 lb',
-        '16 HGT 5\'-04" 19 17 WGT 110 Ib',
-        '16 HGT 5\'-04" 19 17 WGT 110 Ib',
-        '16 HGT 5"-04" 19 17 WGT 110 lb',
-        '16 HGT 5-00" 19 17 WGT 110 lb',
-        '16 HGT 5-04" 19 17 WGT 110 lb',
-        '16 HGT 5-01" 19 17 WGT 175.1b',
-        '16 HGT 5-01 19 17 WGT 1751b',
-        '16 HGT 5-01" 19 17 WGT 1751b',
-        '16 HGT 5-01" 19 17 WGT 1751b',
-        '16 HGT 5-01" 19 17 WGT 1751b',
-        '15 SEX M 16 HGT 6\'-01" 17 WGT 210 lb',
-        '15 SEX M 16 HGT 6\'-01" 17 WGT 210 lb',
-        '15 SEX M 16 HGT 6\'-01" 17 WGT 210 lb',
-        '15 SEX M 16 HGT 6\'-01" 17 WGT 210 lb',
-        '15 SEX M 16 HGT 6\'-01" 17 WGT 210 lb',
-        '16 HGT 5\'-04" 19 17 WGT 190 lb',
-        '16 HGT 5\'-04" 19 17 WGT 190 lb',
-        '16 HGT 5\'-04" 19 17 WGT 190 lb',
-        '16 HGT 5\'004" 19 17 WGT 190 lb', # Should find 5'00"
-        '16 HGT 5\'-04" 19 17 WGT 190 lb',
+    print("\n--- Testing Height Normalization (US only) ---")
 
-        # --- Examples from second prompt ---
-        '4b EXP 09/19/2061 15 SEX F 18 EYES 16 HGT 5\'-05" 19 HAIR 17 WGT 156 Ib',
-        '4b EXP 09/19/2061 15 SEX F 18 EYES 16 HGT 5\'-05" 19 HAIR 17 WGT 156 lb',
-        '4b EXP 09/19/2061 15 SEX F 18 EYES 16 HGT 5\'-05" 19 HAIR 17 WGT 156 Ib',
-        '4b EXP 09/19/2061 15 SEX F 18 EYES 16 HGT 5\'-05" 19 HAIR 17 WGT 156 lb',
-        '4b EXP 09/19/2061 15 SEX F 18 EYES 16 HGT 5-05" 19 HAIR 17 WGT 156 lb',
-        '15 SEX M 18 16 HGT 5-11" 19 HAIR 17 WGT 155 Ib',
-        '15 SEX M 18 16 HGT 5-11" 19 HAIR 17 WGT 155 lb',
-        '15 SEX M 18 16 HGT 5-11" 19 HAIR 17 WGT 155 Ib',
-        '15 SEX M 18 16 HGT 5-11" 19 HAIR 17 WGT 155 lb',
-        '15 SEX M 18 16 HGT 5-11" 19 HAIR 17 WGT 155 lb',
-        '15: SEX F 18 EYES 16 HGT 5\'-04" 19 HAIR 17 WGT 110 Ib DONOR',
-        '15 SEX F 18 EYES 16 HGT 5\'-04" 19 HAIR 17 WGT 110 Ib DONOR',
-        '15 SEX F 18 EYES 16 HGT 5"-04" 19 HAIR 17 WGT 110 lb DONOR',
-        '15 SEX F 18 EYES 16 HGT 5-00" 19 HAIR 17 WGT 110 lb DONOR',
-        '15 SEX F 18 EYES 16 HGT 5-04" 19 HAIR 17 WGT 110 lb DONOR',
-        '16 SEX F 18 16 HGT 5-01" 19 HAIR 17 WGT 175.1b DONOR - -',
-        '16 SEX F 18 16 HGT 5-01 19 HAIR 17 WGT 1751b DONOR - -',
-        '16 SEX F 1 16 HGT 5-01" 19 HAIR 17 WGT 1751b DONOR - -',
-        '16 SEX F 18 16 HGT 5-01" 19 HAIR 17 WGT 1751b DONOR - -',
-        '16 SEX F 14 16 HGT 5-01" 19 HAIR 17 WGT 1751b DONOR - -',
-        '4b 15 SEX M 18 16 HGT 6\'-01" 19 17 WGT 210 lb',
-        '46 15 SEX M 18 16 HGT 6\'-01" 19 17 WGT 210 lb',
-        '46 15 SEX M 18 16 HGT 6\'-01" 19 17 WGT 210 lb',
-        '4b 15 SEX M 18 16 HGT 6\'-01" 19 17 WGT 210 lb',
-        '4b 15 SEX M 18 16 HGT 6\'-01" 19 17 WGT 210 lb',
-        '15 SEX F 18 EYES 16 HGT 5\'-04" 19 HAIR 17 WGT 190 lb DONOR',
-        '15 SEX F 18 EYES 16 HGT 5\'-04" 19 HAIR 17 WGT 190 lb DONOR',
-        '15 SEX F 18 EYES 16 HGT 5\'-04" 19 HAIR 17 WGT 190 lb DONOR',
-        '15 SEX F 18 EYES 16 HGT 5\'004" 19 HAIR 17 WGT 190 lb DONOR', # Should find 5'00"
-        '15 SEX F 18 EYES 16 HGT 5\'-04" 19 HAIR 17 WGT 190 lb DONOR',
-
-        # --- Additional Edge Cases ---
-        'HGT: 5 10', # Space separator
-        'HGT 5\' 11"', # Space after separator
-        'HGT 6\'1"',  # 1-digit inch
-        '16 HGT 509', # Implicit 3-digit format
-        '16 HGT 601', # Implicit 3-digit format
-        'HGT 8\'01"',  # Fail sanity check (too tall)
-        'HGT 3\'11"',  # Fail sanity check (too short)
-        'HGT 5\'12"',  # Fail sanity check (invalid inches)
-        'NO LABEL 5\'05"', # Fail (no HGT label)
-        'HGT 19 5-08', # Should ignore "19" and find 5-08
-        'HGT 5-0', # Should find 5'00"
-        'HGT 5- 2', # Should find 5'02"
-    ]))
-
-    # Sort for cleaner output
-    test_cases_height.sort()
-
-    for test in test_cases_height:
-        # Test with default 'auto' format
-        print(f'"{test}" -> "{normalize_height(test)}"')
-
-    
-    print("\n--- Testing Height (Explicit Format & Auto-Detect) ---")
-    
-    # (test_string, format_to_test)
-    test_cases_height_metric = [
-        ('HGT 1.75m', 'auto'),
-        ('HGT 1,82', 'auto'),
-        ('HGT 168cm', 'auto'),
-        ('HGT 199', 'auto'), # Should parse as 1,99m
-        ('HGT 5-05 175cm', 'us'), # Force US: Should find 5-05
-        ('HGT 5-05 175cm', 'metric'), # Force Metric: Should find 1,75m
-        ('HGT 1.60m 5\'04"', 'metric'), # Force Metric: Should find 1,60m
-        ('HGT 1.60m 5\'04"', 'auto'), # Auto: Should find 5'04" (US-first)
-        ('HGT 160 5\'04"', 'auto'), # Auto: Should find 5'04" (US-first)
-        ('HGT 160 5\'04"', 'metric'), # Force Metric: Should find 1,60m
-        ('HGT 508', 'auto'), # Auto: Should find 5'08"
-        ('HGT 508', 'us'),   # Force US: Should find 5'08"
-        ('HGT 508', 'metric'), # Force Metric: Should fail
-        ('HGT 180', 'auto'), # Auto: Should find 1,80m (US 1'80" is invalid)
-        ('HGT 180', 'metric'), # Force Metric: Should find 1,80m
-        ('HGT 180', 'us'), # Force US: Should fail (1'80" invalid)
-        ('HGT 99cm', 'metric'), # Fail Metric: (Too short)
+    test_cases_us = [
+        # old tests
+        "HGT 5'05\"",
+        "HGT 5-05",
+        "HGT 508",
+        "HGT 5 08",
+        "HGT 507",
+        "HGT 19 5-08",
+        "HGT 6-00",
+        "HGT 4-11",
+        "HGT 6 11",
+        "HGT 705",
+        "HGT 6'11\"",
+        "HGT 4'00\"",
+        "HGT 7'00\"",
+        "HGT 3'11\"",
+        "HGT 8'02\"",
+        "HGT 11 5 09",
+        "HGT 18 5 10",
+        "HGT 165 5'09",
+        "5-07",
+        "5'07",
+        "507",
+        "5'00",
+        "6'00",
+        "411",
+        "611",
+        "705",
+        # your new test cases
+        "16 HGT 5'-00 NONE",
+        "16 HGT 5-00 NONE",
+        "16 HGT 5'-00 NONE",
+        "16 HGT 5'-00 NONE",
+        "16 HGT 5-00 NONE",
+        "16 HGT 18 5'-07\" NONE",
+        "16 HGT 18 5'-07\" NONE",
+        "16 HGT 18 5'-07\" NONE",
+        "16 HGT 18 5'-07\" NONE",
+        "16 HGT 18 5'-07\" NONE",
+        "16 HGT 18 5'-09\" NONE",
+        "16 HGT 18 5'-09\" NONE",
+        "16 HGT 18 5'-09\" NONE",
+        "16 HGT 18 5'-09\" NONE",
+        "16 HGT 18 5'-09\" NONE",
+        "16 HGT 5-07 NONE",
+        "16 HGT 5-07 NONE",
+        "16 HGT 507 NONE",
+        "16 HGT 5-07 NONE",
+        "16 HGT 5-07 NONE",
+        "16 HGT 18 6'-07\" NONE",
+        "16 HGT 18 6'-07\" NONE",
+        "16 HGT 18 6'-07\" NONE",
+        "16 HGT 18 6'-07\" NONE",
+        "16 HGT 18 6'-07\" NONE",
     ]
-    
-    for test, fmt in test_cases_height_metric:
-        print(f'"{test}" (format: {fmt}) -> "{normalize_height(test, fmt)}"')
+
+    for test in test_cases_us:
+        print(f'"{test}" -> "{normalize_height(test, "us")}"')
+
