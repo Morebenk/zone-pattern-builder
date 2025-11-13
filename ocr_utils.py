@@ -25,7 +25,12 @@ def call_ocr_api(image_bytes: bytes, filename: str, api_url: str) -> Optional[Di
 
 
 def extract_words(ocr_result: Dict) -> List[Dict]:
-    """Extract words with geometry"""
+    """
+    Extract words with geometry and noise flags
+
+    IMPORTANT: Does NOT filter out spaces to preserve index alignment
+    with per_model_outputs in API response (which include spaces)
+    """
     words = []
     if 'items' in ocr_result and ocr_result['items']:
         page = ocr_result['items'][0]
@@ -34,13 +39,14 @@ def extract_words(ocr_result: Dict) -> List[Dict]:
                 for word in line.get('words', []):
                     geom = word.get('geometry', [])
                     text = word.get('value', '')
-                    if len(geom) == 4 and text.strip():
+                    if len(geom) == 4:
                         x1, y1, x2, y2 = geom
                         words.append({
                             'text': text,
                             'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
                             'center_x': (x1 + x2) / 2,
                             'center_y': (y1 + y2) / 2,
+                            'is_noise': word.get('is_noise', False),  # Transfer noise flag from API
                         })
     return words
 
