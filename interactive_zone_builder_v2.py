@@ -592,6 +592,179 @@ def render_build_mode():
                 )
                 zone_config['pattern'] = validation_pattern
 
+        # Clustering configuration
+        st.divider()
+        st.markdown("### 🎯 Clustering Configuration")
+        st.caption("Separate labels from values when zone contains multiple lines/columns")
+
+        with st.expander("ℹ️ When to use clustering"):
+            st.markdown("""
+            **Use clustering when your zone contains multiple groups of words:**
+
+            **Example 1: Multi-word names**
+            ```
+            Zone contains:
+            1. MOHAMED REDA JR  ← First name (3 words)
+            2. BEN KACEM        ← Last name (2 words)
+            ```
+            → Use `cluster_by='y'` + `cluster_select='highest'` to pick line 1
+
+            **Example 2: Label + Value**
+            ```
+            Zone contains:
+            SEX / Sexe  ← Label (bilingual)
+            M           ← Value
+            ```
+            → Use `cluster_by='y'` + `cluster_select='lowest'` to pick value
+
+            **Example 3: Multiple columns**
+            ```
+            Zone contains:
+            SEX: M   EYES: BRO
+            ```
+            → Use `cluster_by='x'` + `cluster_select='rightmost'` to pick right column
+
+            ---
+
+            **💡 Pro Tips:**
+            - **Auto Tolerance**: Let the system calculate optimal spacing based on word sizes (recommended for most cases)
+            - **Label Patterns**: Add regex patterns to filter template-specific labels (e.g., `^(sex|dob|ln)$` for US licenses)
+            - **Field Type**: The system uses your selected format (name/date/etc.) for smart quality scoring
+            - **Cleanup Pattern**: Use regex to remove unwanted text after extraction (e.g., `^.*:` removes "Label:")
+            """)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            enable_clustering = st.checkbox(
+                "Enable Clustering",
+                value=bool(zone_config.get('cluster_by')),
+                key=f"enable_clustering_{st.session_state.current_field}",
+                help="Group words by position to separate labels from values"
+            )
+
+        if enable_clustering:
+            with col2:
+                cluster_by = st.selectbox(
+                    "Cluster Axis",
+                    options=['y', 'x'],
+                    index=0 if zone_config.get('cluster_by', 'y') == 'y' else 1,
+                    key=f"cluster_by_{st.session_state.current_field}",
+                    help="Y-axis = group horizontal lines (words on same row) | X-axis = group vertical columns (words in same column)"
+                )
+                zone_config['cluster_by'] = cluster_by
+
+                # Show axis clarification
+                if cluster_by == 'y':
+                    st.caption("📍 Y-axis: Groups words on **same horizontal line** (use for label: value)")
+                else:
+                    st.caption("📍 X-axis: Groups words in **same vertical column** (use for vertical layouts)")
+
+            with col3:
+                # Smart options based on clustering axis
+                if cluster_by == 'y':
+                    # Y-axis clustering: vertical position matters (top/bottom)
+                    select_options = ['lowest', 'highest', 'largest']
+                    default_strategy = 'lowest'
+                    help_text = "Lowest=bottom, Highest=top, Largest=most words"
+                else:  # cluster_by == 'x'
+                    # X-axis clustering: horizontal position matters (left/right)
+                    select_options = ['leftmost', 'rightmost', 'largest']
+                    default_strategy = 'rightmost'
+                    help_text = "Leftmost=left cluster, Rightmost=right cluster, Largest=most words"
+
+                # Get current value, fallback to default if invalid for current axis
+                current_select = zone_config.get('cluster_select', default_strategy)
+                if current_select not in select_options:
+                    current_select = default_strategy
+
+                cluster_select = st.selectbox(
+                    "Selection Strategy",
+                    options=select_options,
+                    index=select_options.index(current_select),
+                    key=f"cluster_select_{st.session_state.current_field}",
+                    help=help_text
+                )
+                zone_config['cluster_select'] = cluster_select
+
+            # Tolerance configuration
+            st.markdown("**Cluster Tolerance**")
+
+            col_tol1, col_tol2 = st.columns([1, 3])
+            with col_tol1:
+                # Get current tolerance value (could be 'auto' or float)
+                current_tolerance = zone_config.get('cluster_tolerance', 0.02)
+                is_auto = current_tolerance == 'auto'
+
+                tolerance_mode = st.radio(
+                    "Mode",
+                    options=['Fixed', 'Auto'],
+                    index=1 if is_auto else 0,
+                    key=f"tolerance_mode_{st.session_state.current_field}",
+                    help="Fixed: specify distance | Auto: adaptive based on word sizes",
+                    label_visibility="collapsed"
+                )
+
+            with col_tol2:
+                if tolerance_mode == 'Auto':
+                    zone_config['cluster_tolerance'] = 'auto'
+                    st.info("📏 **Auto**: Calculates tolerance based on median word size (1.5x median)")
+                else:
+                    # Fixed tolerance slider
+                    fixed_value = current_tolerance if isinstance(current_tolerance, (int, float)) else 0.02
+                    cluster_tolerance = st.slider(
+                        "Distance",
+                        min_value=0.01,
+                        max_value=0.05,
+                        value=float(fixed_value),
+                        step=0.001,
+                        key=f"cluster_tolerance_slider_{st.session_state.current_field}",
+                        help="Maximum distance between words in same cluster (normalized 0-1)",
+                        label_visibility="collapsed"
+                    )
+                    zone_config['cluster_tolerance'] = cluster_tolerance
+
+            # Label patterns input (optional, for advanced filtering)
+            st.markdown("**Label Patterns** (Optional)")
+            label_patterns_input = st.text_area(
+                "Regex patterns to filter labels",
+                value='\n'.join(zone_config.get('label_patterns', [])) if zone_config.get('label_patterns') else '',
+                placeholder="e.g., ^(sex|dob|ln)$\nOne pattern per line",
+                height=80,
+                key=f"label_patterns_{st.session_state.current_field}",
+                help="Template-specific patterns to identify and remove label words (one per line)"
+            )
+
+            # Parse label patterns (one per line)
+            if label_patterns_input.strip():
+                label_patterns = [line.strip() for line in label_patterns_input.strip().split('\n') if line.strip()]
+                zone_config['label_patterns'] = label_patterns
+            else:
+                zone_config.pop('label_patterns', None)
+
+            st.divider()
+
+            # Show helpful info based on strategy and axis
+            if cluster_by == 'y':
+                if cluster_select == 'lowest':
+                    st.info("💡 **Lowest** = Bottom cluster (e.g., value below label)\n\nExample: Label on top, value below")
+                elif cluster_select == 'highest':
+                    st.info("💡 **Highest** = Top cluster (e.g., value above label)\n\nExample: Value on top, label below")
+                else:  # largest
+                    st.info("💡 **Largest** = Cluster with most words\n\nExample: Multi-word name vs single-word label")
+            else:  # cluster_by == 'x'
+                if cluster_select == 'rightmost':
+                    st.info("💡 **Rightmost** = Right cluster\n\nExample: Multiple columns → picks rightmost one")
+                elif cluster_select == 'leftmost':
+                    st.info("💡 **Leftmost** = Left cluster\n\nExample: Multiple columns → picks leftmost one")
+                else:  # largest
+                    st.info("💡 **Largest** = Cluster with most words\n\nExample: Multi-word value vs single-word label")
+        else:
+            # Remove clustering config if disabled
+            zone_config.pop('cluster_by', None)
+            zone_config.pop('cluster_select', None)
+            zone_config.pop('cluster_tolerance', None)
+            zone_config.pop('label_patterns', None)
+
         # Custom Pattern Tester
         st.divider()
         render_custom_pattern_tester(zone_config, st.session_state.current_field)
@@ -1158,12 +1331,16 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
         help="Apply cleanup pattern to the value extracted by consensus pattern (e.g., remove remaining labels)"
     )
 
-    # Prepare expanded zone config WITHOUT cleanup
-    # (Consensus patterns search raw text, cleanup is applied to extracted value)
+    # Prepare expanded zone config WITHOUT cleanup and WITHOUT clustering
+    # (Consensus patterns search raw text from expanded zone, NO clustering applied)
+    # (Matches production: hybrid_template._apply_consensus_for_fields)
     expanded_zone_config = zone_config.copy()
     expanded_zone_config['y_range'] = expanded_y
     expanded_zone_config['x_range'] = expanded_x
     expanded_zone_config['cleanup_pattern'] = ''  # Never apply cleanup to zone text for consensus extraction
+    expanded_zone_config.pop('cluster_by', None)  # Never apply clustering to zone text for pattern-based extraction
+    expanded_zone_config.pop('cluster_select', None)
+    expanded_zone_config.pop('cluster_tolerance', None)
 
     # Decide what to show based on whether pattern is entered
     if not consensus_pattern:
@@ -1257,18 +1434,27 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
         # Get cleanup pattern if toggle is enabled
         cleanup_pattern = zone_config.get('cleanup_pattern', '') if apply_cleanup else ''
 
-        # Helper function to test pattern on text and apply cleanup to result
-        def test_pattern_on_text(zone_text, full_text):
-            """Test pattern on zone text only (NO FALLBACK to full text)"""
+        # Helper function to test pattern and cleanup (matches production logic)
+        def test_pattern_on_text(zone_text, full_text, zone_words):
+            """
+            Test pattern on zone text, then cleanup (NO CLUSTERING for pattern-based)
+
+            Flow: consensus_extract → cleanup → result
+            (Matches production: hybrid_template._apply_consensus_for_fields)
+            """
             extracted_value = None
 
-            # Try expanded zone text only (no fallback)
+            # Step 1: Apply consensus_extract pattern to zone text
             if zone_text:
                 match = compiled_pattern.search(zone_text)
                 if match:
+                    # Extract value: use group(1) if capturing group exists, else group(0)
                     extracted_value = match.group(1) if match.groups() else match.group(0)
 
-            # Apply cleanup pattern to the extracted value (if enabled and pattern exists)
+            if not extracted_value:
+                return None
+
+            # Step 2: Apply cleanup pattern (if enabled and pattern exists)
             if extracted_value and cleanup_pattern:
                 try:
                     extracted_value = re.sub(cleanup_pattern, '', extracted_value, flags=re.IGNORECASE).strip()
@@ -1284,8 +1470,9 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
             ocr_result = img_data.get('ocr_result', {})
             per_model_outputs = ocr_result.get('model_comparison', {}).get('per_model_outputs', {})
 
-            # Get expanded zone text for pattern testing (only once per image)
-            model_expanded_zone_results = extract_from_zone_multimodel(
+            # Get expanded zone text AND words for pattern testing
+            from zone_builder.zone_operations import extract_from_zone_multimodel_with_words
+            model_expanded_zone_results_with_words = extract_from_zone_multimodel_with_words(
                 ocr_result, expanded_zone_config, img_data.get('words', [])
             )
 
@@ -1296,14 +1483,14 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
             available_models = list(per_model_outputs.keys()) if per_model_outputs else []
 
             for model_name in available_models:
-                zone_text = model_expanded_zone_results.get(model_name, '')
+                zone_text, zone_words = model_expanded_zone_results_with_words.get(model_name, ('', []))
                 model_data = per_model_outputs.get(model_name, {})
 
                 # Get full document text by joining all words
                 model_words = model_data.get('words', []) if model_data else []
                 full_text = ' '.join(model_words) if model_words else ''
 
-                model_match = test_pattern_on_text(zone_text, full_text)
+                model_match = test_pattern_on_text(zone_text, full_text, zone_words)
                 model_results[model_name] = model_match if model_match else ''
 
             # Normalize and validate each model's result BEFORE voting
