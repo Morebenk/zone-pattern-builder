@@ -1332,13 +1332,14 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
     )
 
     # Prepare expanded zone config WITHOUT cleanup and WITHOUT clustering
-    # (Consensus patterns search raw text from expanded zone, NO clustering applied)
-    # (Matches production: hybrid_template._apply_consensus_for_fields)
+    # For pattern-based: clustering is applied AFTER pattern extraction (not before)
+    # Pattern needs ALL zone text to match against (clustering filters it after)
     expanded_zone_config = zone_config.copy()
     expanded_zone_config['y_range'] = expanded_y
     expanded_zone_config['x_range'] = expanded_x
-    expanded_zone_config['cleanup_pattern'] = ''  # Never apply cleanup to zone text for consensus extraction
-    expanded_zone_config.pop('cluster_by', None)  # Never apply clustering to zone text for pattern-based extraction
+    expanded_zone_config['cleanup_pattern'] = ''  # Cleanup happens AFTER pattern extraction
+    # Remove clustering from expanded zone (will be applied AFTER pattern extraction)
+    expanded_zone_config.pop('cluster_by', None)
     expanded_zone_config.pop('cluster_select', None)
     expanded_zone_config.pop('cluster_tolerance', None)
 
@@ -1434,17 +1435,21 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
         # Get cleanup pattern if toggle is enabled
         cleanup_pattern = zone_config.get('cleanup_pattern', '') if apply_cleanup else ''
 
-        # Helper function to test pattern and cleanup (matches production logic)
+        # Helper function to test pattern, apply clustering, then cleanup
         def test_pattern_on_text(zone_text, full_text, zone_words):
             """
-            Test pattern on zone text, then cleanup (NO CLUSTERING for pattern-based)
+            Test pattern on zone text, apply clustering to matched words, then cleanup
 
-            Flow: consensus_extract → cleanup → result
-            (Matches production: hybrid_template._apply_consensus_for_fields)
+            Flow:
+            1. Apply pattern to zone_text → extract rough value
+            2. Find words that make up this value (by token matching)
+            3. Apply clustering to those words → filter to best cluster
+            4. Rebuild text from clustered words
+            5. Apply cleanup
             """
             extracted_value = None
 
-            # Step 1: Apply consensus_extract pattern to zone text
+            # Step 1: Apply consensus_extract pattern to zone text (NOT clustered yet)
             if zone_text:
                 match = compiled_pattern.search(zone_text)
                 if match:
@@ -1454,7 +1459,17 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
             if not extracted_value:
                 return None
 
-            # Step 2: Apply cleanup pattern (if enabled and pattern exists)
+            # Step 2: Apply clustering (if configured) to ALL zone words
+            # Pattern validates the zone has relevant data, clustering selects best cluster (e.g., highest line)
+            if zone_config.get('cluster_by') and zone_words:
+                from zone_builder.zone_operations import apply_clustering
+                clustered_words = apply_clustering(zone_words, zone_config)
+                if clustered_words:
+                    # Rebuild text from clustered words
+                    extracted_value = ' '.join(w.get('text', '') for w in clustered_words)
+                # If clustering removed all words, keep original extracted_value
+
+            # Step 3: Apply cleanup pattern (if enabled and pattern exists)
             if extracted_value and cleanup_pattern:
                 try:
                     extracted_value = re.sub(cleanup_pattern, '', extracted_value, flags=re.IGNORECASE).strip()
@@ -1470,10 +1485,21 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
             ocr_result = img_data.get('ocr_result', {})
             per_model_outputs = ocr_result.get('model_comparison', {}).get('per_model_outputs', {})
 
-            # Get expanded zone text AND words for pattern testing
+            # Get expanded zone text for pattern matching
             from zone_builder.zone_operations import extract_from_zone_multimodel_with_words
             model_expanded_zone_results_with_words = extract_from_zone_multimodel_with_words(
                 ocr_result, expanded_zone_config, img_data.get('words', [])
+            )
+
+            # Get ORIGINAL zone words for clustering (tight zone, not expanded)
+            # Remove clustering from config so we get unclustered words
+            original_zone_config_unclustered = zone_config.copy()
+            original_zone_config_unclustered['cleanup_pattern'] = ''  # No cleanup yet
+            original_zone_config_unclustered.pop('cluster_by', None)  # Don't cluster yet
+            original_zone_config_unclustered.pop('cluster_select', None)
+            original_zone_config_unclustered.pop('cluster_tolerance', None)
+            model_original_zone_results_with_words = extract_from_zone_multimodel_with_words(
+                ocr_result, original_zone_config_unclustered, img_data.get('words', [])
             )
 
             # Test pattern on each model - Get model names dynamically from the data
@@ -1483,14 +1509,18 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
             available_models = list(per_model_outputs.keys()) if per_model_outputs else []
 
             for model_name in available_models:
-                zone_text, zone_words = model_expanded_zone_results_with_words.get(model_name, ('', []))
+                # Get expanded zone text for pattern matching
+                expanded_zone_text, _ = model_expanded_zone_results_with_words.get(model_name, ('', []))
+                # Get original zone words for clustering
+                _, original_zone_words = model_original_zone_results_with_words.get(model_name, ('', []))
+
                 model_data = per_model_outputs.get(model_name, {})
 
                 # Get full document text by joining all words
                 model_words = model_data.get('words', []) if model_data else []
                 full_text = ' '.join(model_words) if model_words else ''
 
-                model_match = test_pattern_on_text(zone_text, full_text, zone_words)
+                model_match = test_pattern_on_text(expanded_zone_text, full_text, original_zone_words)
                 model_results[model_name] = model_match if model_match else ''
 
             # Normalize and validate each model's result BEFORE voting
