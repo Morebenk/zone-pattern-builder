@@ -57,6 +57,10 @@ def clean_zone_config(zone_config: Dict[str, Any]) -> Dict[str, Any]:
         if field_format in ['height', 'sex', 'eyes', 'hair', 'weight']:
             clean['consensus_extract'] = r".*"  # Match any text, let normalizer handle extraction
 
+    # Label patterns (template-specific label detection)
+    if zone_config.get('label_patterns'):
+        clean['label_patterns'] = zone_config['label_patterns']
+
     # Clustering keys
     if zone_config.get('cluster_by'):
         clean['cluster_by'] = zone_config['cluster_by']
@@ -219,6 +223,13 @@ def export_to_python(zones: Dict[str, Dict[str, Any]], metadata: Dict[str, Any] 
                 lines.append(f'            "consensus_extract": r"{consensus_value}",')
             else:
                 lines.append(f'            "consensus_extract": r"""{consensus_value}""",')
+
+        # Label patterns (template-specific label detection)
+        if 'label_patterns' in clean:
+            patterns = clean['label_patterns']
+            # Format as list of raw strings
+            pattern_strings = [f"r'{p}'" if '"' not in p else f'r"{p}"' for p in patterns]
+            lines.append(f"            'label_patterns': [{', '.join(pattern_strings)}],")
 
         # Clustering keys
         if 'cluster_by' in clean:
