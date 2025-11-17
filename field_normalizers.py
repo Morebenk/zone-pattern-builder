@@ -64,16 +64,16 @@ WEIGHT_PATTERN = re.compile(r'(\d{2,3})')
 # Allow word boundary before feet, accept various quote/hyphen variants,
 # require feet to be a single digit 4-7 and inches 0-99 (we sanity-check later).
 HEIGHT_PATTERN_US_EXPLICIT = re.compile(
-    r"\b([4-7])\s*(?:'|’|`|\u2019|\-|\s)+\s*([0-9]{1,2})\b"
+    r"([4-7])\s*(?:'|’|`|\u2019|\-|\s)+\s*([0-9]{1,2})\b"
 )
 
-# Implicit 3-digit like 507 or 508, but require first digit 4-7 to avoid false matches.
-HEIGHT_PATTERN_US_IMPLICIT = re.compile(r'\b([4-7])([0-9]{2})\b')
+# Implicit 3-digit like 507 or 508. (Removed leading \b)
+HEIGHT_PATTERN_US_IMPLICIT = re.compile(r'([4-7])([0-9]{2})\b')
 
-# Metric patterns (unchanged from yours)
-HEIGHT_PATTERN_METRIC_DEC = re.compile(r'\b(1)[,.](\d{2})\s*M?\b')
-HEIGHT_PATTERN_METRIC_CM = re.compile(r'\b(1[4-9]\d|2[0-1]\d)\s*CM\b')
-HEIGHT_PATTERN_METRIC_INT = re.compile(r'\b(1[4-9]\d|2[0-1]\d)\b')
+# Metric patterns (from previous logic, removed leading \b)
+HEIGHT_PATTERN_METRIC_DEC = re.compile(r'(1)[,.](\d{2})\s*M?\b')
+HEIGHT_PATTERN_METRIC_CM = re.compile(r'(1[4-9]\d|2[0-1]\d)\s*CM\b')
+HEIGHT_PATTERN_METRIC_INT = re.compile(r'(1[4-9]\d|2[0-1]\d)\b')
 # ============================================================================
 
 def _extract_color_after_label(
@@ -176,13 +176,17 @@ def normalize_date(date_str: str, format: str = "DD.MM.YYYY") -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _parse_us_height(text: str) -> Optional[str]:
+    """Tries to parse US-style height (5'08" or 508) from text."""
+    
     # 1) Explicit formats like 5'07", 5-07, 5 07
+    # Uses finditer to get the *first* valid match
     for match in HEIGHT_PATTERN_US_EXPLICIT.finditer(text):
         try:
             feet_str, inches_str = match.groups()
             feet = int(feet_str)
             inches = int(inches_str)
-            if 4 <= feet <= 7 and 0 <= inches <= 11:
+            # Sanity check inches 0-11
+            if 0 <= inches <= 11:
                 return f"{feet}'{str(inches).zfill(2)}"
         except (ValueError, IndexError):
             continue
@@ -192,7 +196,8 @@ def _parse_us_height(text: str) -> Optional[str]:
         try:
             feet = int(match.group(1))
             inches = int(match.group(2))
-            if 4 <= feet <= 7 and 0 <= inches <= 11:
+            # Sanity check inches 0-11
+            if 0 <= inches <= 11:
                 return f"{feet}'{str(inches).zfill(2)}"
         except (ValueError, IndexError):
             continue
@@ -200,6 +205,9 @@ def _parse_us_height(text: str) -> Optional[str]:
     return None
 
 def _parse_metric_height(text: str) -> Optional[str]:
+    """Tries to parse metric-style height (1.75m or 175cm) from text."""
+    
+    # Priority 1: Decimal format (1.75m, 1,82)
     for match_dec in HEIGHT_PATTERN_METRIC_DEC.finditer(text):
         try:
             meters, cm_str = match_dec.groups()
@@ -208,16 +216,20 @@ def _parse_metric_height(text: str) -> Optional[str]:
         except (ValueError, IndexError):
             continue
 
+    # Priority 2: Explicit CM format (168cm)
     for match_cm in HEIGHT_PATTERN_METRIC_CM.finditer(text):
         try:
             cm_str = match_cm.group(1)
+            # Sanity check 140-219cm is already in regex
             return f"{cm_str[0]},{cm_str[1:]}m"
         except (ValueError, IndexError):
             continue
 
+    # Priority 3: Ambiguous integer format (180)
     for match_int in HEIGHT_PATTERN_METRIC_INT.finditer(text):
         try:
             digits = match_int.group(1)
+            # Sanity check 140-219cm is already in regex
             return f"{digits[0]},{digits[1:]}m"
         except (ValueError, IndexError):
             continue
@@ -239,16 +251,20 @@ def normalize_height(value: str, format_type: str = 'auto') -> Optional[str]:
     """
     if not value:
         return None
+    # Convert to upper for regex consistency (e.g., 'cm' vs 'CM')
     search_text = value.upper().strip()
 
     if format_type == 'us':
         return _parse_us_height(search_text)
+    
     if format_type == 'metric':
         return _parse_metric_height(search_text)
-    # auto
+    
+    # 'auto' mode: Try US first, then metric
     us_result = _parse_us_height(search_text)
     if us_result:
         return us_result
+    
     return _parse_metric_height(search_text)
 
 

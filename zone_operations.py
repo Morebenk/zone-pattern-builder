@@ -48,7 +48,11 @@ def is_in_zone(word: Dict, x_range: Tuple, y_range: Tuple) -> bool:
 
 def apply_clustering(zone_words: List[Dict], zone_config: Dict) -> List[Dict]:
     """
-    Apply clustering to separate labels from values (simulates production ExtractionPipeline)
+    Apply clustering to group words spatially and select by position.
+
+    Two modes:
+    1. SPATIAL-ONLY (default): Pure spatial clustering - just groups by axis and selects by position
+    2. LABEL-FILTER (with label_patterns): Filters out label words before selecting cluster
 
     Args:
         zone_words: Words in the zone (with 'parsed' geometry or direct coords)
@@ -57,8 +61,7 @@ def apply_clustering(zone_words: List[Dict], zone_config: Dict) -> List[Dict]:
             - cluster_select: 'lowest', 'highest', 'rightmost', 'leftmost', 'largest'
             - cluster_tolerance: float (default 0.02)
             - pattern: Optional validation pattern
-            - label_patterns: Optional list of regex patterns for template-specific labels
-            - format: Optional field type for quality scoring (name, date, etc.)
+            - label_patterns: Optional list of regex patterns (enables label filtering)
 
     Returns:
         Filtered list of words (the selected cluster), or original words if clustering fails
@@ -72,9 +75,7 @@ def apply_clustering(zone_words: List[Dict], zone_config: Dict) -> List[Dict]:
 
     cluster_select = zone_config.get('cluster_select', 'lowest')
     cluster_tolerance = zone_config.get('cluster_tolerance', 0.02)
-    pattern = zone_config.get('pattern')
-    label_patterns = zone_config.get('label_patterns')  # Get template-specific label patterns
-    field_type = zone_config.get('format')  # Get field type for quality scoring
+    label_patterns = zone_config.get('label_patterns')
 
     # Convert zone_builder word format to production format (needs 'parsed' dict)
     words_for_clustering = []
@@ -104,31 +105,51 @@ def apply_clustering(zone_words: List[Dict], zone_config: Dict) -> List[Dict]:
     if not clusters:
         return zone_words
 
-    # Step 2: Rank clusters and filter labels
-    ranked_clusters = select_value_cluster(
-        clusters,
-        strategy=cluster_select,
-        label_patterns=label_patterns,
-        field_type=field_type
-    )
+    # Step 2: Optionally filter labels from each cluster
+    if label_patterns:
+        from app.field_extraction.processing.cleaners import filter_labels
+        # Filter labels from each cluster
+        filtered_clusters = []
+        for cluster in clusters:
+            filtered = filter_labels(cluster, label_patterns)
+            if filtered:
+                filtered_clusters.append(filtered)
 
-    if not ranked_clusters:
-        return zone_words
+        if not filtered_clusters:
+            return zone_words
 
-    # Step 3: Try each ranked cluster, return first valid one
-    for candidate_cluster in ranked_clusters:
-        # Validate if pattern is provided
-        if pattern:
-            combined_text = ' '.join(w.get('text', '') for w in candidate_cluster).strip()
-            if not re.match(pattern, combined_text):
-                continue  # Try next cluster
+        clusters = filtered_clusters
 
-        # Sort selected cluster by X position for left-to-right reading
-        selected = sorted(candidate_cluster, key=lambda w: w.get('parsed', {}).get('center_x', 0))
-        return selected
+    # Step 3: Select cluster by spatial strategy (no quality scoring)
+    clusters_with_pos = []
+    for cluster in clusters:
+        avg_y = sum(w.get('parsed', {}).get('center_y', 0) for w in cluster) / len(cluster)
+        avg_x = sum(w.get('parsed', {}).get('center_x', 0) for w in cluster) / len(cluster)
+        clusters_with_pos.append({
+            'words': cluster,
+            'avg_y': avg_y,
+            'avg_x': avg_x,
+            'size': len(cluster)
+        })
 
-    # If no valid cluster found, return original words
-    return zone_words
+    # Select by strategy
+    if cluster_select == 'lowest':
+        selected_cluster = max(clusters_with_pos, key=lambda c: c['avg_y'])
+    elif cluster_select == 'highest':
+        selected_cluster = min(clusters_with_pos, key=lambda c: c['avg_y'])
+    elif cluster_select == 'rightmost':
+        selected_cluster = max(clusters_with_pos, key=lambda c: c['avg_x'])
+    elif cluster_select == 'leftmost':
+        selected_cluster = min(clusters_with_pos, key=lambda c: c['avg_x'])
+    elif cluster_select == 'largest':
+        selected_cluster = max(clusters_with_pos, key=lambda c: c['size'])
+    else:
+        # Default to first cluster
+        selected_cluster = clusters_with_pos[0]
+
+    # Sort selected cluster by X position for left-to-right reading
+    selected = sorted(selected_cluster['words'], key=lambda w: w.get('parsed', {}).get('center_x', 0))
+    return selected
 
 
 def calculate_aggregate_zone(
@@ -370,9 +391,111 @@ def extract_from_zone_multimodel(
     return {model: text for model, (text, words) in results_with_words.items()}
 
 
-def get_consensus_from_models(model_results: Dict[str, str]) -> Tuple[str, int, int]:
+def _character_level_voting(
+    candidates: List[str],
+    field_name: Optional[str] = None
+) -> str:
     """
-    Calculate true consensus by voting across all models
+    OPTIMIZED CHARACTER-LEVEL VOTING with simple majority counting and logical tie-breaking
+
+    Instead of voting on complete strings, vote on each character position.
+    Each model gets 1 vote per character (not weighted by confidence).
+
+    When votes are tied, uses field semantics for logical tie-breaking:
+    - Name fields: prefer alphabetic over numeric (names are letters)
+    - Date fields: prefer numeric over alphabetic (dates are numbers)
+
+    Args:
+        candidates: List of candidate strings from different models
+        field_name: Optional field name for tie-breaking context
+
+    Returns:
+        Best voted string
+
+    Performance: O(n*m) where n=candidates, m=avg length - very fast!
+    """
+    if not candidates:
+        return ""
+
+    # Quick path: if only one candidate, return it
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Quick check: if all values are identical, return immediately
+    if len(set(candidates)) == 1:
+        return candidates[0]
+
+    # Determine field type for tie-breaking based on field semantics
+    prefer_alpha = field_name and any(x in field_name for x in [
+        'first_name', 'last_name', 'alternate_name',  # Names are letters
+        'sex',  # M/F
+        'hair', 'eyes'  # Color codes (BRO, BLK, BLU, etc.)
+    ])
+
+    prefer_numeric = field_name and any(x in field_name for x in [
+        'date_of_birth', 'issue_date', 'expiration_date',  # Dates are numbers
+        'height', 'weight',  # Measurements are numbers
+        'document_number', 'dd_code', 'license_class'  # IDs/codes are numbers
+    ])
+
+    # STEP 1: Align strings and vote character-by-character
+    max_len = max(len(v) for v in candidates)
+    char_votes = defaultdict(lambda: defaultdict(int))  # {position: {char: count}}
+
+    for value in candidates:
+        # Pad shorter strings with empty char for alignment
+        padded = value.ljust(max_len, '\0')
+
+        for pos, char in enumerate(padded):
+            if char != '\0':  # Skip padding
+                # Simple counting: each model gets 1 vote
+                char_votes[pos][char] += 1
+
+    # STEP 2: Pick best character at each position with logical tie-breaking
+    result_chars = []
+    for pos in range(max_len):
+        if pos not in char_votes:
+            break  # No more characters
+
+        votes = char_votes[pos]
+
+        # Sort by vote count descending
+        sorted_votes = sorted(votes.items(), key=lambda x: x[1], reverse=True)
+        best_char, best_count = sorted_votes[0]
+
+        # LOGICAL TIE-BREAKING: If multiple characters have same max count
+        if len(sorted_votes) > 1:
+            tied_chars = [char for char, count in sorted_votes if count == best_count]
+
+            if len(tied_chars) > 1:
+                # We have a tie - use field semantics to break it
+                if prefer_alpha:
+                    # Prefer alphabetic characters (names, sex, hair, eyes)
+                    alpha_chars = [c for c in tied_chars if c.isalpha()]
+                    if alpha_chars:
+                        best_char = alpha_chars[0]
+                elif prefer_numeric:
+                    # Prefer numeric characters (dates, height, weight, IDs)
+                    digit_chars = [c for c in tied_chars if c.isdigit()]
+                    if digit_chars:
+                        best_char = digit_chars[0]
+
+        result_chars.append(best_char)
+
+    voted_value = ''.join(result_chars).rstrip()
+    return voted_value
+
+
+def get_consensus_from_models(
+    model_results: Dict[str, str],
+    field_name: Optional[str] = None
+) -> Tuple[str, int, int]:
+    """
+    Calculate true consensus using character-level voting across all models
+
+    Args:
+        model_results: Dict mapping model names to extracted text
+        field_name: Optional field name for tie-breaking context
 
     Returns:
         (consensus_text, vote_count, total_models)
@@ -380,9 +503,17 @@ def get_consensus_from_models(model_results: Dict[str, str]) -> Tuple[str, int, 
     if not model_results:
         return "", 0, 0
 
-    vote_counts = Counter(model_results.values())
-    consensus_text = vote_counts.most_common(1)[0][0] if vote_counts else ""
-    vote_count = vote_counts[consensus_text] if consensus_text else 0
+    # Filter out empty results
+    candidates = [text for text in model_results.values() if text]
+
+    if not candidates:
+        return "", 0, len(model_results)
+
+    # Use character-level voting instead of simple string voting
+    consensus_text = _character_level_voting(candidates, field_name)
+
+    # Count how many models produced the exact consensus result
+    vote_count = sum(1 for text in model_results.values() if text == consensus_text)
     total_models = len(model_results)
 
     return consensus_text, vote_count, total_models
