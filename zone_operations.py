@@ -9,15 +9,13 @@ import re
 from typing import Dict, List, Optional, Tuple, Set, Any
 from collections import defaultdict, Counter
 
-# Import clustering functions from production
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from app.field_extraction.processing.geometry import (
-    cluster_words_by_position,
-    select_value_cluster
-)
-from app.field_extraction.processing.cleaners import filter_labels
+# Import clustering functions from local standalone copy (independent from main OCR app)
+try:
+    # Try relative import first (when imported as part of zone_builder package)
+    from .clustering_utils import cluster_words_by_position, filter_labels
+except ImportError:
+    # Fallback to direct import (when imported as standalone module)
+    from clustering_utils import cluster_words_by_position, filter_labels
 
 
 def validate_consensus_pattern(pattern: str) -> Tuple[bool, str]:
@@ -108,7 +106,6 @@ def apply_clustering(zone_words: List[Dict], zone_config: Dict) -> List[Dict]:
 
     # Step 2: Optionally filter labels from each cluster
     if label_patterns:
-        from app.field_extraction.processing.cleaners import filter_labels
         # Filter labels from each cluster
         filtered_clusters = []
         for cluster in clusters:

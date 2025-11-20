@@ -414,7 +414,7 @@ def render_session_management():
 
     uploaded_session = st.file_uploader(
         "Load session or template",
-        type=['json', 'gz', 'py'],
+        type=None,  # Accept all file types to support .json.gz compound extensions
         key="session_loader",
         help="Load .json.gz session (with images) or .py template (zones only)"
     )
@@ -424,7 +424,7 @@ def render_session_management():
             try:
                 file_name = uploaded_session.name
                 file_content = uploaded_session.getvalue()
-                
+
                 # Check if it's a Python template file
                 if file_name.endswith('.py'):
                     # Parse template file
@@ -1329,7 +1329,7 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
 
     # Validate consensus pattern and show info
     if consensus_pattern:
-        from zone_operations import validate_consensus_pattern
+        from zone_builder.zone_operations import validate_consensus_pattern
         is_valid, error_msg = validate_consensus_pattern(consensus_pattern)
         if not is_valid:
             st.error(f"⚠️ **Invalid Pattern:** {error_msg}")
