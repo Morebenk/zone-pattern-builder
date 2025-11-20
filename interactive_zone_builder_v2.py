@@ -626,7 +626,16 @@ def render_build_mode():
             ```
             → Use `cluster_by='y'` + `cluster_select='lowest'` to pick value
 
-            **Example 3: Multiple columns**
+            **Example 3: Value between labels**
+            ```
+            Zone may capture varying combinations:
+            - "Endorsements" + "NONE"
+            - "NONE" alone
+            - "NONE" + "Restrictions"
+            ```
+            → Use `cluster_by='y'` + `cluster_select='center'` to always pick value closest to zone center
+
+            **Example 4: Multiple columns**
             ```
             Zone contains:
             SEX: M   EYES: BRO
@@ -672,14 +681,14 @@ def render_build_mode():
                 # Smart options based on clustering axis
                 if cluster_by == 'y':
                     # Y-axis clustering: vertical position matters (top/bottom)
-                    select_options = ['lowest', 'highest', 'largest']
+                    select_options = ['lowest', 'highest', 'center', 'largest']
                     default_strategy = 'lowest'
-                    help_text = "Lowest=bottom, Highest=top, Largest=most words"
+                    help_text = "Lowest=bottom, Highest=top, Center=closest to zone center, Largest=most words"
                 else:  # cluster_by == 'x'
                     # X-axis clustering: horizontal position matters (left/right)
-                    select_options = ['leftmost', 'rightmost', 'largest']
+                    select_options = ['leftmost', 'rightmost', 'center', 'largest']
                     default_strategy = 'rightmost'
-                    help_text = "Leftmost=left cluster, Rightmost=right cluster, Largest=most words"
+                    help_text = "Leftmost=left, Rightmost=right, Center=closest to zone center, Largest=most words"
 
                 # Get current value, fallback to default if invalid for current axis
                 current_select = zone_config.get('cluster_select', default_strategy)
@@ -758,6 +767,8 @@ def render_build_mode():
                     st.info("💡 **Lowest** = Bottom cluster (e.g., value below label)\n\nExample: Label on top, value below")
                 elif cluster_select == 'highest':
                     st.info("💡 **Highest** = Top cluster (e.g., value above label)\n\nExample: Value on top, label below")
+                elif cluster_select == 'center':
+                    st.info("💡 **Center** = Cluster closest to zone center\n\nExample: Zone center Y=0.450\n- 'Endorsements' (Y=0.435) + 'NONE' (Y=0.472) → picks 'NONE' (closer to center)\n- Handles varying zone captures automatically")
                 else:  # largest
                     st.info("💡 **Largest** = Cluster with most words\n\nExample: Multi-word name vs single-word label")
             else:  # cluster_by == 'x'
@@ -765,6 +776,8 @@ def render_build_mode():
                     st.info("💡 **Rightmost** = Right cluster\n\nExample: Multiple columns → picks rightmost one")
                 elif cluster_select == 'leftmost':
                     st.info("💡 **Leftmost** = Left cluster\n\nExample: Multiple columns → picks leftmost one")
+                elif cluster_select == 'middle':
+                    st.info("💡 **Middle** = Center cluster (e.g., middle column)\n\nExample: Left column, center column, right column → picks center")
                 else:  # largest
                     st.info("💡 **Largest** = Cluster with most words\n\nExample: Multi-word value vs single-word label")
         else:
@@ -1260,17 +1273,27 @@ def render_zone_extraction_section(zone_config, field_name: str = None):
 
         pattern = zone_config.get('pattern', '')
 
-        # Vote on RAW values FIRST, then normalize winner (like main OCR)
+        # Normalize PER MODEL first, THEN vote on normalized values (matches main OCR flow)
         if model_results_raw:
-            # Vote on RAW values using character-level voting
-            from zone_builder.zone_operations import get_consensus_from_models
-            consensus_text, vote_count, total_models = get_consensus_from_models(
-                model_results_raw,
-                field_name
-            )
+            # Step 1: Normalize each model's result
+            model_results_normalized = {}
+            for model_key, raw_value in model_results_raw.items():
+                normalized_value = normalize_field(raw_value, field_format, field_name, **format_options) if raw_value else None
+                if normalized_value:
+                    model_results_normalized[model_key] = normalized_value
 
-            # THEN normalize the winner
-            normalized_text = normalize_field(consensus_text, field_format, field_name, **format_options) if consensus_text else None
+            # Step 2: Vote on normalized values using character-level voting
+            if model_results_normalized:
+                from zone_builder.zone_operations import get_consensus_from_models
+                normalized_text, vote_count, total_models = get_consensus_from_models(
+                    model_results_normalized,
+                    field_name
+                )
+                consensus_text = normalized_text  # For display purposes
+            else:
+                consensus_text = None
+                normalized_text = None
+                vote_count, total_models = 0, len(model_results_raw)
 
             # Validate against pattern
             is_valid = bool(normalized_text) and (not pattern or bool(re.match(pattern, normalized_text)))
@@ -1375,17 +1398,27 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
 
             pattern = zone_config.get('pattern', '')
 
-            # Vote on RAW values FIRST, then normalize winner (like main OCR)
+            # Normalize PER MODEL first, THEN vote on normalized values (matches main OCR flow)
             if model_results_raw:
-                # Vote on RAW values using character-level voting
-                from zone_builder.zone_operations import get_consensus_from_models
-                consensus_text, vote_count, total_models = get_consensus_from_models(
-                    model_results_raw,
-                    field_name
-                )
+                # Step 1: Normalize each model's result
+                model_results_normalized = {}
+                for model_key, raw_value in model_results_raw.items():
+                    normalized_value = normalize_field(raw_value, field_format, field_name, **format_options) if raw_value else None
+                    if normalized_value:
+                        model_results_normalized[model_key] = normalized_value
 
-                # THEN normalize the winner
-                normalized_text = normalize_field(consensus_text, field_format, field_name, **format_options) if consensus_text else None
+                # Step 2: Vote on normalized values using character-level voting
+                if model_results_normalized:
+                    from zone_builder.zone_operations import get_consensus_from_models
+                    normalized_text, vote_count, total_models = get_consensus_from_models(
+                        model_results_normalized,
+                        field_name
+                    )
+                    consensus_text = normalized_text  # For display purposes
+                else:
+                    consensus_text = None
+                    normalized_text = None
+                    vote_count, total_models = 0, len(model_results_raw)
 
                 # Validate against pattern
                 is_valid = bool(normalized_text) and (not pattern or bool(re.match(pattern, normalized_text)))
@@ -1516,21 +1549,29 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
 
             pattern = zone_config.get('pattern', '')
 
-            # Vote on RAW values FIRST, then normalize winner (like main OCR)
+            # Normalize PER MODEL first, THEN vote on normalized values (matches main OCR flow)
             if model_results:
-                from zone_builder.zone_operations import get_consensus_from_models
-                consensus_text, vote_count, total_models = get_consensus_from_models(
-                    model_results,
-                    field_name
-                )
+                # Step 1: Normalize each model's result
+                model_results_normalized = {}
+                for model_key, raw_value in model_results.items():
+                    normalized_value = normalize_field(raw_value, field_format, field_name, **format_options) if raw_value else None
+                    if normalized_value:
+                        model_results_normalized[model_key] = normalized_value
 
-                # THEN normalize the winner
-                consensus_match = normalize_field(consensus_text, field_format, field_name, **format_options) if consensus_text else None
-
-                # Validate against pattern (if needed for display purposes)
-                # Note: consensus_match might be None if normalization fails
+                # Step 2: Vote on normalized values using character-level voting
+                if model_results_normalized:
+                    from zone_builder.zone_operations import get_consensus_from_models
+                    consensus_match, vote_count, total_models = get_consensus_from_models(
+                        model_results_normalized,
+                        field_name
+                    )
+                    consensus_text = consensus_match  # For display purposes
+                else:
+                    consensus_match, vote_count, total_models = None, 0, len(model_results)
+                    consensus_text = None
             else:
                 consensus_match, vote_count, total_models = None, 0, 0
+                consensus_text = None
 
             # Store results for this image
             all_image_results.append({
@@ -1798,15 +1839,26 @@ def process_test_images_and_extract(test_files, api_url):
                     validation_pattern = working_zone_config.get('pattern', '')
 
                     if zone_model_results:
-                        # Vote on RAW values FIRST, then normalize winner (like main OCR)
-                        from zone_builder.zone_operations import get_consensus_from_models
-                        zone_consensus_text, zone_vote_count, zone_total_models = get_consensus_from_models(
-                            zone_model_results,
-                            field_name
-                        )
+                        # Normalize PER MODEL first, THEN vote on normalized values (matches main OCR flow)
+                        # Step 1: Normalize each model's result
+                        zone_model_results_normalized = {}
+                        for model_key, raw_value in zone_model_results.items():
+                            normalized_value = normalize_field(raw_value, field_format, field_name, **format_options) if raw_value else None
+                            if normalized_value:
+                                zone_model_results_normalized[model_key] = normalized_value
 
-                        # THEN normalize the winner
-                        zone_normalized_text = normalize_field(zone_consensus_text, field_format, field_name, **format_options) if zone_consensus_text else ""
+                        # Step 2: Vote on normalized values using character-level voting
+                        if zone_model_results_normalized:
+                            from zone_builder.zone_operations import get_consensus_from_models
+                            zone_normalized_text, zone_vote_count, zone_total_models = get_consensus_from_models(
+                                zone_model_results_normalized,
+                                field_name
+                            )
+                            zone_consensus_text = zone_normalized_text  # For display purposes
+                        else:
+                            zone_consensus_text = ""
+                            zone_normalized_text = ""
+                            zone_vote_count, zone_total_models = 0, len(zone_model_results)
 
                         # Validate against pattern
                         zone_is_valid = bool(zone_normalized_text) and (not validation_pattern or bool(re.match(validation_pattern, zone_normalized_text)))
@@ -1895,16 +1947,27 @@ def process_test_images_and_extract(test_files, api_url):
 
                             validation_pattern = working_zone_config.get('pattern', '')
 
-                            # Vote on RAW values FIRST, then normalize winner (like main OCR)
+                            # Normalize PER MODEL first, THEN vote on normalized values (matches main OCR flow)
                             if pattern_model_results:
-                                from zone_builder.zone_operations import get_consensus_from_models
-                                pattern_consensus_text, pattern_vote_count, pattern_total_models = get_consensus_from_models(
-                                    pattern_model_results,
-                                    field_name
-                                )
+                                # Step 1: Normalize each model's result
+                                pattern_model_results_normalized = {}
+                                for model_key, raw_value in pattern_model_results.items():
+                                    normalized_value = normalize_field(raw_value, field_format, field_name, **format_options) if raw_value else None
+                                    if normalized_value:
+                                        pattern_model_results_normalized[model_key] = normalized_value
 
-                                # THEN normalize the winner
-                                pattern_normalized_text = normalize_field(pattern_consensus_text, field_format, field_name, **format_options) if pattern_consensus_text else ""
+                                # Step 2: Vote on normalized values using character-level voting
+                                if pattern_model_results_normalized:
+                                    from zone_builder.zone_operations import get_consensus_from_models
+                                    pattern_normalized_text, pattern_vote_count, pattern_total_models = get_consensus_from_models(
+                                        pattern_model_results_normalized,
+                                        field_name
+                                    )
+                                    pattern_consensus_text = pattern_normalized_text  # For display purposes
+                                else:
+                                    pattern_consensus_text = ""
+                                    pattern_normalized_text = ""
+                                    pattern_vote_count, pattern_total_models = 0, len(pattern_model_results)
 
                                 # Validate against pattern
                                 pattern_is_valid = bool(pattern_normalized_text) and (not validation_pattern or bool(re.match(validation_pattern, pattern_normalized_text)))

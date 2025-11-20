@@ -58,10 +58,11 @@ def apply_clustering(zone_words: List[Dict], zone_config: Dict) -> List[Dict]:
         zone_words: Words in the zone (with 'parsed' geometry or direct coords)
         zone_config: Zone config with clustering parameters:
             - cluster_by: 'y' (horizontal lines) or 'x' (vertical columns)
-            - cluster_select: 'lowest', 'highest', 'rightmost', 'leftmost', 'largest'
+            - cluster_select: 'lowest', 'highest', 'center', 'rightmost', 'leftmost', 'largest'
             - cluster_tolerance: float (default 0.02)
             - pattern: Optional validation pattern
             - label_patterns: Optional list of regex patterns (enables label filtering)
+            - y_range/x_range: Required for 'center' strategy (to calculate zone center)
 
     Returns:
         Filtered list of words (the selected cluster), or original words if clustering fails
@@ -137,6 +138,16 @@ def apply_clustering(zone_words: List[Dict], zone_config: Dict) -> List[Dict]:
         selected_cluster = max(clusters_with_pos, key=lambda c: c['avg_y'])
     elif cluster_select == 'highest':
         selected_cluster = min(clusters_with_pos, key=lambda c: c['avg_y'])
+    elif cluster_select == 'center':
+        # Select cluster closest to zone center (handles varying zone captures)
+        if cluster_by == 'y':
+            y_range = zone_config.get('y_range', (0, 1))
+            zone_center = (y_range[0] + y_range[1]) / 2
+            selected_cluster = min(clusters_with_pos, key=lambda c: abs(c['avg_y'] - zone_center))
+        else:  # cluster_by == 'x'
+            x_range = zone_config.get('x_range', (0, 1))
+            zone_center = (x_range[0] + x_range[1]) / 2
+            selected_cluster = min(clusters_with_pos, key=lambda c: abs(c['avg_x'] - zone_center))
     elif cluster_select == 'rightmost':
         selected_cluster = max(clusters_with_pos, key=lambda c: c['avg_x'])
     elif cluster_select == 'leftmost':
@@ -396,14 +407,14 @@ def _character_level_voting(
     field_name: Optional[str] = None
 ) -> str:
     """
-    OPTIMIZED CHARACTER-LEVEL VOTING with simple majority counting and logical tie-breaking
+    IMPROVED VOTING: Length filtering + complete string voting + character voting fallback
 
-    Instead of voting on complete strings, vote on each character position.
-    Each model gets 1 vote per character (not weighted by confidence).
+    Process:
+    1. Filter outlier lengths (keeps only most common length to prevent misalignment)
+    2. Try complete string voting first (if majority agrees, use it)
+    3. Fall back to character-level voting for ties/close calls
 
-    When votes are tied, uses field semantics for logical tie-breaking:
-    - Name fields: prefer alphabetic over numeric (names are letters)
-    - Date fields: prefer numeric over alphabetic (dates are numbers)
+    This prevents misalignment issues like "BLU" + "BLU" (in longer string) → "BLUU"
 
     Args:
         candidates: List of candidate strings from different models
@@ -425,6 +436,32 @@ def _character_level_voting(
     if len(set(candidates)) == 1:
         return candidates[0]
 
+    # STEP 1: Filter by length - remove outliers to prevent misalignment
+    lengths = [len(c) for c in candidates]
+    length_counts = Counter(lengths)
+
+    # Find the most common length
+    most_common_length = length_counts.most_common(1)[0][0]
+
+    # Keep ONLY candidates with the most common length (strict filtering)
+    # This removes misaligned strings like "M 181 Eyes BLU" when most say "M 18 Eyes BLU"
+    filtered_candidates = [c for c in candidates if len(c) == most_common_length]
+
+    if not filtered_candidates:
+        # Fallback if filtering removed everything (shouldn't happen)
+        filtered_candidates = candidates
+
+    # STEP 2: Complete string voting first
+    string_counts = Counter(filtered_candidates)
+    most_common_string, most_common_count = string_counts.most_common(1)[0]
+
+    # If one string has majority (>50%), use it immediately
+    if most_common_count > len(filtered_candidates) / 2:
+        return most_common_string
+
+    # STEP 3: Character-level voting for ties/close calls
+    # Now all candidates have same length, so alignment works correctly
+
     # Determine field type for tie-breaking based on field semantics
     prefer_alpha = field_name and any(x in field_name for x in [
         'first_name', 'last_name', 'alternate_name',  # Names are letters
@@ -438,11 +475,11 @@ def _character_level_voting(
         'document_number', 'dd_code', 'license_class'  # IDs/codes are numbers
     ])
 
-    # STEP 1: Align strings and vote character-by-character
-    max_len = max(len(v) for v in candidates)
+    # Vote character-by-character on filtered candidates
+    max_len = max(len(v) for v in filtered_candidates)
     char_votes = defaultdict(lambda: defaultdict(int))  # {position: {char: count}}
 
-    for value in candidates:
+    for value in filtered_candidates:
         # Pad shorter strings with empty char for alignment
         padded = value.ljust(max_len, '\0')
 
@@ -451,7 +488,7 @@ def _character_level_voting(
                 # Simple counting: each model gets 1 vote
                 char_votes[pos][char] += 1
 
-    # STEP 2: Pick best character at each position with logical tie-breaking
+    # Pick best character at each position with logical tie-breaking
     result_chars = []
     for pos in range(max_len):
         if pos not in char_votes:

@@ -80,15 +80,15 @@ def _extract_color_after_label(
     text: str, label: str, color_pattern: re.Pattern
 ) -> Optional[str]:
     """
-    Generic helper to find a color code that appears after a specific label.
+    Generic helper to find a color code. Works with or without label.
 
     Args:
-        text: The raw input string.
-        label: The label to search for (e.g., "EYES", "HAIR").
+        text: The raw input string (with or without label).
+        label: The label to search for (e.g., "EYES", "HAIR"), optional.
         color_pattern: The compiled regex pattern containing valid color codes.
 
     Returns:
-        The first valid color code found after the label, or None.
+        The first valid color code found (after the label if present), or None.
     """
     if not text:
         return None
@@ -96,16 +96,16 @@ def _extract_color_after_label(
     # Standardize to uppercase
     upper_text = text.upper().strip()
 
-    # Find the position of the label (e.g., "EYES")
+    # Find the position of the label (e.g., "EYES") - optional, zone may have removed it
     label_pos = upper_text.find(label)
 
-    # If the label doesn't exist, we can't find the color
-    if label_pos == -1:
-        return None
-
-    # Create a new string starting *after* the label
-    # This ensures "HAIR BLK EYES BRN" won't find "BLK" for "EYES"
-    search_text = upper_text[label_pos + len(label):]
+    if label_pos != -1:
+        # Label found - search after it
+        # This ensures "HAIR BLK EYES BRN" won't find "BLK" for "EYES"
+        search_text = upper_text[label_pos + len(label):]
+    else:
+        # No label found - search entire string (zone may have removed label already)
+        search_text = upper_text
 
     # Find the *first* match for a valid color in the new string
     match = color_pattern.search(search_text)
@@ -274,11 +274,11 @@ def normalize_height(value: str, format_type: str = 'auto') -> Optional[str]:
 
 def normalize_weight(value: str, format_type: str = 'auto') -> Optional[str]:
     """
-    Extracts a 2 or 3-digit weight value that appears after the "WGT" label.
+    Extracts a 2 or 3-digit weight value. Works with or without "WGT" label.
     Supports US (pounds) and metric (kilograms) formats.
 
     Args:
-        value: Raw string from OCR
+        value: Raw string from OCR (with or without "WGT" label)
         format_type: 'us' (pounds), 'metric' (kilograms), or 'auto'
 
     Returns:
@@ -286,22 +286,24 @@ def normalize_weight(value: str, format_type: str = 'auto') -> Optional[str]:
 
     Examples:
         normalize_weight("WGT 156 lb", "us") → "156lb"
+        normalize_weight("155lb", "us") → "155lb"
         normalize_weight("WGT 70 kg", "metric") → "70kg"
-        normalize_weight("WGT 156", "auto") → "156lb" (assumes US if no unit)
+        normalize_weight("156", "auto") → "156lb" (assumes US if no unit)
     """
     if not value:
         return None
 
     upper_text = value.upper().strip()
 
-    # Find the position of the label "WGT"
+    # Find the position of the label "WGT" (optional - zone extraction may have already removed it)
     label_pos = upper_text.find("WGT")
 
-    if label_pos == -1:
-        return None
-
-    # Create a new string starting *after* the label
-    search_text = upper_text[label_pos + len("WGT"):]
+    if label_pos != -1:
+        # Label found - search after it
+        search_text = upper_text[label_pos + len("WGT"):]
+    else:
+        # No label found - search entire string (zone may have removed label already)
+        search_text = upper_text
 
     # Auto-detect format based on presence of 'KG' or 'LB'
     if format_type == 'auto':
@@ -385,11 +387,10 @@ def normalize_sex(value: str) -> Optional[str]:
 
 def normalize_eye_color(value: str) -> Optional[str]:
     """
-    Extracts the AAMVA eye color code (BLK, BLU, BRN, etc.) that
-    appears after the "EYES" label in a string.
+    Extracts the AAMVA eye color code (BLK, BLU, BRN, etc.). Works with or without "EYES" label.
 
     Args:
-        value: Raw string from OCR
+        value: Raw string from OCR (with or without "EYES" label)
 
     Returns:
         The 3-letter eye color code, or None if not found.
@@ -404,17 +405,182 @@ def normalize_eye_color(value: str) -> Optional[str]:
 
 def normalize_hair_color(value: str) -> Optional[str]:
     """
-    Extracts the AAMVA hair color code (BLK, BLN, BRO, etc.) that
-    appears after the "HAIR" label in a string.
+    Extracts the AAMVA hair color code (BLK, BLN, BRO, etc.). Works with or without "HAIR" label.
 
     Args:
-        value: Raw string from OCR
+        value: Raw string from OCR (with or without "HAIR" label)
 
     Returns:
         The 3-letter hair color code, or None if not found.
     """
     return _extract_color_after_label(value, "HAIR", HAIR_COLOR_PATTERN)
 
+
+# ============================================================================
+# US DRIVER LICENSE ENDORSEMENTS & RESTRICTIONS
+# ============================================================================
+
+def _parse_multiple_codes(text: str, valid_codes: List[str]) -> List[str]:
+    """
+    Robust parser that handles mixed separators (dots, commas, spaces) AND 
+    concatenated codes within those separators.
+    """
+    found_codes = []
+    # Sort valid codes by length (longest first) to prioritize M1/M2 over M
+    sorted_codes = sorted([c for c in valid_codes if c != 'NONE'], key=len, reverse=True)
+
+    # 1. Normalize all separators to spaces
+    # Replace commas and dots with space
+    clean_text = re.sub(r'[,\.]', ' ', text)
+    
+    # 2. Split into chunks
+    chunks = clean_text.split()
+
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+
+        # Case A: Exact match (e.g., "M1" or "P")
+        if chunk in valid_codes:
+            found_codes.append(chunk)
+            continue
+
+        # Case B: Concatenated codes inside a chunk (e.g., "HM1")
+        remaining = chunk
+        while remaining:
+            matched = False
+            for code in sorted_codes:
+                if remaining.startswith(code):
+                    found_codes.append(code)
+                    remaining = remaining[len(code):]
+                    matched = True
+                    break
+            
+            if not matched:
+                # If we can't match the start, it's noise. Skip one char.
+                remaining = remaining[1:]
+
+    return found_codes
+
+# Valid endorsement codes from AAMVA standard
+US_DL_ENDORSEMENTS = [
+    'NONE',
+    # Single-character codes
+    'H', 'N', 'P', 'S', 'T', 'X', 'M', 'L', 'F', 'G', 'R', 'W', 'Z', 'O', 'A',
+    # Multi-character codes
+    'M1', 'M2', 'M3', 'P1', 'P2'
+]
+
+def normalize_endorsements(value: str) -> Optional[str]:
+    """
+    Normalize US driver license endorsements.
+    
+    Handles:
+    - Left Bleed: "9a Endorsements", "Sa Endorsemants", "Da End"
+    - Right Bleed: "12 Restrictions", "Restriotions", "Vehicle", "Class"
+    - OCR Noise: Dots, missing spaces, concatenated codes.
+    """
+    if not value:
+        return None
+
+    upper_text = value.upper().strip()
+
+    # Reject full label matches that are not field values
+    if re.fullmatch(r'(DRIVER\s*LICENSE|USA|AMERICA|CLASS)', upper_text):
+        return None
+
+    # 1. START ANCHOR (Fuzzy match for "Endorsements")
+    # Matches: 9a End, End, Ends, Endors, 9 Endorsements
+    start_pattern = r'^(?:[9SDo0-9]+[a-zA-Z]?\s*)?E[NM]D(?:\w*)?\.?\s*'
+    match_start = re.search(start_pattern, upper_text)
+    if match_start:
+        upper_text = upper_text[match_start.end():]
+
+    # 2. END ANCHOR (Cut "Restrictions", "Vehicle", "Class")
+    # Updates:
+    # - R[EO]?ST matches "REST" and "RST" (no vowel)
+    # - RE\b matches "12 Re"
+    # - V[EHICO] matches "Vehicle" bleed if Rest label is missing
+    end_pattern = r'(?:12\s*)?(?:R[EO]?ST\w*|RE\b|V[EHICO]\w*|CLASS).*$'
+    upper_text = re.sub(end_pattern, '', upper_text)
+
+    upper_text = upper_text.strip()
+
+    # 3. Explicit NONE check
+    if 'NONE' in upper_text:
+        return 'NONE'
+
+    # 4. Parse Codes
+    codes = _parse_multiple_codes(upper_text, US_DL_ENDORSEMENTS)
+
+    if not codes:
+        return None
+
+    # Sort and return comma-separated
+    codes_sorted = sorted(set(codes))
+    return ','.join(codes_sorted)
+
+# Valid restriction codes from AAMVA standard
+US_DL_RESTRICTIONS = [
+    'NONE',
+    # Single-character codes (A-Z)
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+    # Numeric codes (1-16)
+    # '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16',
+    # P-series (P1-P40)
+    'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10',
+    'P11', 'P12', 'P13', 'P14', 'P15', 'P16', 'P17', 'P18', 'P19', 'P20',
+    'P21', 'P22', 'P23', 'P24', 'P25', 'P26', 'P27', 'P28', 'P29', 'P30',
+    'P31', 'P32', 'P33', 'P34', 'P35', 'P36', 'P37', 'P38', 'P39', 'P40',
+    # J-series (J01-J11, J99)
+    'J01', 'J02', 'J03', 'J04', 'J05', 'J06', 'J07', 'J08', 'J09', 'J10', 'J11', 'J99',
+    # Special codes
+    'S1', 'A1', 'A2'
+]
+
+def normalize_restrictions(value: str) -> Optional[str]:
+    """
+    Normalize US driver license restrictions with aggressive noise removal
+    for bleed-in text from 'Endorsements' (left) and 'Vehicle Class' (right).
+    """
+    if not value:
+        return None
+
+    # Standardize to uppercase
+    upper_text = value.upper().strip()
+
+    # Reject full label matches that are not field values
+    if re.fullmatch(r'(DRIVER\s*LICENSE|USA|AMERICA|CLASS)', upper_text):
+        return None
+
+    # 1. START ANCHOR (Fuzzy match for "Restrictions")
+    # Matches: 12 Restrictions, Rest, Rst, Resticions
+    match_start = re.search(r'(?:12\s*)?(?:R[EO]?ST\w*|RE\b)\.?\s*', upper_text)
+    if match_start:
+        upper_text = upper_text[match_start.end():]
+
+    # 2. END ANCHOR (Cut "Vehicle", "Class")
+    # Matches: 9 Vehicle, gVehicle, Class, 9 V
+    end_pattern = r'(?<=[\s\.,A-Z0-9])(?:(?:[9GS5]\s*)?V[EHICO]|CLASS|9\s*V\b).*$'
+    upper_text = re.sub(end_pattern, '', upper_text)
+
+    upper_text = upper_text.strip()
+
+    # 3. Explicit NONE check
+    if 'NONE' in upper_text:
+        return 'NONE'
+
+    # 4. Parse Codes
+    codes = _parse_multiple_codes(upper_text, US_DL_RESTRICTIONS)
+
+    if not codes:
+        return None
+
+    # Sort and return comma-separated
+    codes_sorted = sorted(set(codes))
+    return ','.join(codes_sorted)
 
 # ============================================================================
 # FIELD-SPECIFIC CLEANING (from app/field_extraction/processing/cleaners.py)
@@ -526,7 +692,7 @@ def normalize_field(value: str, field_format: str, field_name: Optional[str] = N
 
     Args:
         value: Raw extracted text
-        field_format: Field format type (date, height, weight, sex, string, number)
+        field_format: Field format type (date, height, weight, sex, eyes, hair, endorsements, restrictions, string, number)
         field_name: Field name for field-specific cleaning (e.g., "first_name", "address")
         **format_options: Format-specific options:
             - date_format: Date format string (DD.MM.YYYY, etc.)
@@ -560,6 +726,12 @@ def normalize_field(value: str, field_format: str, field_name: Optional[str] = N
     elif field_format == 'weight':
         weight_format = format_options.get('weight_format', 'auto')
         value = normalize_weight(value, weight_format)
+
+    elif field_format == 'endorsements':
+        value = normalize_endorsements(value)
+
+    elif field_format == 'restrictions':
+        value = normalize_restrictions(value)
 
     elif field_format == 'number':
         # Number format: uppercase alphanumeric
