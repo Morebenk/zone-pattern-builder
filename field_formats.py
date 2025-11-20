@@ -14,16 +14,17 @@ from typing import Dict, List, Optional, Tuple
 # ============================================================================
 
 FIELD_FORMATS = [
-    'string',        # Default - no special processing
-    'date',          # Date values with format specification
-    'height',        # Height values (US/metric)
-    'weight',        # Weight values (US/metric)
-    'sex',           # Gender/sex values (M/F)
-    'eyes',          # Eye color values (extracts as-is: BRO, BRN, BLU, BLUE, etc.)
-    'hair',          # Hair color values (extracts as-is: BLK, BRO, BRN, BLN, etc.)
-    'endorsements',  # Driver license endorsements (H, N, P, M1, etc.)
-    'restrictions',  # Driver license restrictions (A-Z, 1-16, P1-P40, J01-J11, etc.)
-    'number',        # Numeric/code fields
+    'string',              # Default - no special processing
+    'date',                # Date values with format specification
+    'height',              # Height values (US/metric)
+    'weight',              # Weight values (US/metric)
+    'sex',                 # Gender/sex values (M/F)
+    'eyes',                # Eye color values (extracts as-is: BRO, BRN, BLU, BLUE, etc.)
+    'hair',                # Hair color values (extracts as-is: BLK, BRO, BRN, BLN, etc.)
+    'endorsements',        # Driver license endorsements (H, N, P, M1, etc.)
+    'restrictions',        # Driver license restrictions (A-Z, 1-16, P1-P40, J01-J11, etc.)
+    'number',              # Numeric/code fields
+    'ai_parsed_address',   # AI-parsed address (returns structured dict)
 ]
 
 # Date format options (matching app/field_extraction/processing/normalizers.py)
@@ -88,6 +89,7 @@ def get_format_help_text(field_format: str) -> str:
         'endorsements': 'DL endorsements - normalized to comma-separated codes (H,N,P) or NONE',
         'restrictions': 'DL restrictions - normalized to comma-separated codes (C,D,M) or NONE',
         'number': 'Numeric/code fields - uppercase alphanumeric',
+        'ai_parsed_address': '🤖 AI-parsed address using multiple AI models with auto-failover (DeepSeek→GPT→Gemini)',
     }
     return help_texts.get(field_format, '')
 
@@ -186,6 +188,10 @@ def auto_detect_format(field_name: str) -> str:
     # Number/code fields
     if any(keyword in field_lower for keyword in ['number', 'code', 'dl', 'license']):
         return 'number'
+
+    # Address fields (auto-suggest AI parsing)
+    if 'address' in field_lower or field_lower in ['addr', 'address']:
+        return 'ai_parsed_address'
 
     # Default to string
     return 'string'

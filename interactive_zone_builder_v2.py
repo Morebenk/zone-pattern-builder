@@ -1573,7 +1573,7 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
                 consensus_match, vote_count, total_models = None, 0, 0
                 consensus_text = None
 
-            # Store results for this image
+            # Store results for this image - use NORMALIZED results for display
             all_image_results.append({
                 'img_idx': img_idx,
                 'img_data': img_data,
