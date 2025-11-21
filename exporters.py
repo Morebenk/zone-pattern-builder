@@ -57,9 +57,9 @@ def clean_zone_config(zone_config: Dict[str, Any]) -> Dict[str, Any]:
         if field_format in ['height', 'sex', 'eyes', 'hair', 'weight']:
             clean['consensus_extract'] = r".*"  # Match any text, let normalizer handle extraction
 
-    # Label patterns (template-specific label detection)
-    if zone_config.get('label_patterns'):
-        clean['label_patterns'] = zone_config['label_patterns']
+    # Expected labels (fuzzy matching for label detection)
+    if zone_config.get('labels'):
+        clean['labels'] = zone_config['labels']
 
     # Clustering keys
     if zone_config.get('cluster_by'):
@@ -68,6 +68,10 @@ def clean_zone_config(zone_config: Dict[str, Any]) -> Dict[str, Any]:
         clean['cluster_select'] = zone_config['cluster_select']
     if zone_config.get('cluster_tolerance'):
         clean['cluster_tolerance'] = zone_config['cluster_tolerance']
+
+    # Tie-breaking strategy for character voting
+    if zone_config.get('tie_break_prefer'):
+        clean['tie_break_prefer'] = zone_config['tie_break_prefer']
 
     # Text processing flags
     if zone_config.get('uppercase'):
@@ -224,12 +228,12 @@ def export_to_python(zones: Dict[str, Dict[str, Any]], metadata: Dict[str, Any] 
             else:
                 lines.append(f'            "consensus_extract": r"""{consensus_value}""",')
 
-        # Label patterns (template-specific label detection)
-        if 'label_patterns' in clean:
-            patterns = clean['label_patterns']
-            # Format as list of raw strings
-            pattern_strings = [f"r'{p}'" if '"' not in p else f'r"{p}"' for p in patterns]
-            lines.append(f"            'label_patterns': [{', '.join(pattern_strings)}],")
+        # Expected labels (fuzzy matching for label detection)
+        if 'labels' in clean:
+            labels = clean['labels']
+            # Format as list of strings
+            label_strings = [f"'{label}'" if '"' not in label else f'"{label}"' for label in labels]
+            lines.append(f"            'labels': [{', '.join(label_strings)}],")
 
         # Clustering keys
         if 'cluster_by' in clean:
@@ -238,6 +242,10 @@ def export_to_python(zones: Dict[str, Dict[str, Any]], metadata: Dict[str, Any] 
             lines.append(f"            'cluster_select': '{clean['cluster_select']}',")
         if 'cluster_tolerance' in clean:
             lines.append(f"            'cluster_tolerance': {clean['cluster_tolerance']},")
+
+        # Tie-breaking strategy
+        if 'tie_break_prefer' in clean:
+            lines.append(f"            'tie_break_prefer': '{clean['tie_break_prefer']}',")
 
         # Boolean flags
         if 'uppercase' in clean:

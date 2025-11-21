@@ -506,13 +506,20 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
                 if match:
                     vals = match.group(1).split(',')
                     zone_config[key] = (float(vals[0].strip()), float(vals[1].strip()))
-            
+
             # Parse string values
-            for key in ['format', 'date_format', 'height_format', 'weight_format']:
+            for key in ['format', 'date_format', 'height_format', 'weight_format', 'cluster_by', 'cluster_select']:
                 pattern = rf"'{key}':\s*'([^']+)'"
                 match = re.search(pattern, field_config_text)
                 if match:
                     zone_config[key] = match.group(1)
+
+            # Parse float values
+            for key in ['cluster_tolerance']:
+                pattern = rf"'{key}':\s*([0-9.]+)"
+                match = re.search(pattern, field_config_text)
+                if match:
+                    zone_config[key] = float(match.group(1))
             
             # Parse regex patterns (with r"" or r'' prefix, including multiline)
             for key in ['pattern', 'cleanup_pattern', 'consensus_extract']:
@@ -531,14 +538,36 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
                 if match:
                     # Keep the raw string as-is (backslashes preserved)
                     zone_config[key] = match.group(1)
-            
+
             # Parse boolean values
             for key in ['uppercase', 'strict_validation', 'validate_alphabetic', 'allow_commas', 'allow_digits']:
                 if re.search(rf"'{key}':\s*True", field_config_text):
                     zone_config[key] = True
                 elif re.search(rf"'{key}':\s*False", field_config_text):
                     zone_config[key] = False
-            
+
+            # Parse label_patterns list (legacy, for backwards compatibility)
+            label_patterns_match = re.search(r"'label_patterns':\s*\[(.*?)\]", field_config_text, re.DOTALL)
+            if label_patterns_match:
+                patterns_str = label_patterns_match.group(1)
+                # Extract all r"..." or r'...' patterns
+                patterns = []
+                for pattern_match in re.finditer(r"r['\"]([^'\"]+)['\"]", patterns_str):
+                    patterns.append(pattern_match.group(1))
+                if patterns:
+                    zone_config['label_patterns'] = patterns
+
+            # Parse labels list (new fuzzy matching approach)
+            labels_match = re.search(r"'labels':\s*\[(.*?)\]", field_config_text, re.DOTALL)
+            if labels_match:
+                labels_str = labels_match.group(1)
+                # Extract all "..." or '...' strings
+                labels = []
+                for label_match in re.finditer(r"['\"]([^'\"]+)['\"]", labels_str):
+                    labels.append(label_match.group(1))
+                if labels:
+                    zone_config['labels'] = labels
+
             if zone_config:  # Only add if we parsed something
                 zones[field_name] = zone_config
         
@@ -574,13 +603,20 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
                     if match:
                         vals = match.group(1).split(',')
                         zone_config[key] = (float(vals[0].strip()), float(vals[1].strip()))
-                
+
                 # Parse string values
-                for key in ['format', 'date_format', 'height_format', 'weight_format']:
+                for key in ['format', 'date_format', 'height_format', 'weight_format', 'cluster_by', 'cluster_select']:
                     pattern = rf"'{key}':\s*'([^']+)'"
                     match = re.search(pattern, field_config_text)
                     if match:
                         zone_config[key] = match.group(1)
+
+                # Parse float values
+                for key in ['cluster_tolerance']:
+                    pattern = rf"'{key}':\s*([0-9.]+)"
+                    match = re.search(pattern, field_config_text)
+                    if match:
+                        zone_config[key] = float(match.group(1))
                 
                 # Parse regex patterns (with r"" or r'' prefix, including multiline)
                 for key in ['pattern', 'cleanup_pattern', 'consensus_extract']:
@@ -599,13 +635,35 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
                     if match:
                         # Keep the raw string as-is (backslashes preserved)
                         zone_config[key] = match.group(1)
-                
+
                 # Parse boolean values
-                for key in ['uppercase', 'strict_validation', 'validate_alphabetic']:
+                for key in ['uppercase', 'strict_validation', 'validate_alphabetic', 'allow_commas', 'allow_digits']:
                     pattern = rf"'{key}':\s*True"
                     if re.search(pattern, field_config_text):
                         zone_config[key] = True
-                
+
+                # Parse label_patterns list (legacy, for backwards compatibility)
+                label_patterns_match = re.search(r"'label_patterns':\s*\[(.*?)\]", field_config_text, re.DOTALL)
+                if label_patterns_match:
+                    patterns_str = label_patterns_match.group(1)
+                    # Extract all r"..." or r'...' patterns
+                    patterns = []
+                    for pattern_match in re.finditer(r"r['\"]([^'\"]+)['\"]", patterns_str):
+                        patterns.append(pattern_match.group(1))
+                    if patterns:
+                        zone_config['label_patterns'] = patterns
+
+                # Parse labels list (new fuzzy matching approach)
+                labels_match = re.search(r"'labels':\s*\[(.*?)\]", field_config_text, re.DOTALL)
+                if labels_match:
+                    labels_str = labels_match.group(1)
+                    # Extract all "..." or '...' strings
+                    labels = []
+                    for label_match in re.finditer(r"['\"]([^'\"]+)['\"]", labels_str):
+                        labels.append(label_match.group(1))
+                    if labels:
+                        zone_config['labels'] = labels
+
         # If still no zones, try one more fallback approach
         if not zones:
             return None

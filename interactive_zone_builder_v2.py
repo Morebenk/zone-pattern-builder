@@ -365,12 +365,12 @@ def render_template_metadata():
         }
 
     # Use value parameter to show loaded metadata, but allow editing
+    # Note: No 'key' parameter - this allows loaded values to display correctly
     template_name = st.text_input(
         "Template Name",
         value=st.session_state.metadata.get('template_name', 'my_template'),
         help="Used for file naming (e.g., 'texas_dl_front')",
-        placeholder="e.g., texas_dl_front",
-        key="metadata_template_name"
+        placeholder="e.g., texas_dl_front"
     )
     st.session_state.metadata['template_name'] = template_name
 
@@ -378,8 +378,7 @@ def render_template_metadata():
         "Class Name",
         value=st.session_state.metadata.get('class_name', 'MyTemplate'),
         help="Python class name for code generation (e.g., 'TexasDLFront')",
-        placeholder="e.g., TexasDLFront",
-        key="metadata_class_name"
+        placeholder="e.g., TexasDLFront"
     )
     st.session_state.metadata['class_name'] = class_name
 
@@ -387,8 +386,7 @@ def render_template_metadata():
         "Version",
         value=st.session_state.metadata.get('version', '1.0'),
         help="Template version for tracking changes",
-        placeholder="e.g., 1.0",
-        key="metadata_version"
+        placeholder="e.g., 1.0"
     )
     st.session_state.metadata['version'] = version
 
@@ -601,6 +599,31 @@ def render_build_mode():
                 )
                 zone_config['pattern'] = validation_pattern
 
+        # Tie-breaking configuration
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            tie_break_options = {
+                'Auto': None,
+                'Numeric': 'numeric',
+                'Alpha': 'alpha',
+                'Alphanumeric': 'alphanumeric'
+            }
+            current_tie_break = zone_config.get('tie_break_prefer')
+            current_label = 'Auto'
+            for label, value in tie_break_options.items():
+                if value == current_tie_break:
+                    current_label = label
+                    break
+
+            tie_break_label = st.selectbox(
+                "Tie-Breaking",
+                options=list(tie_break_options.keys()),
+                index=list(tie_break_options.keys()).index(current_label),
+                key=f"tie_break_{st.session_state.current_field}",
+                help="Character voting tie-breaker: Auto (infer from field), Numeric (digits), Alpha (letters), Alphanumeric (both)"
+            )
+            zone_config['tie_break_prefer'] = tie_break_options[tie_break_label]
+
         # Clustering configuration
         st.divider()
         st.markdown("### 🎯 Clustering Configuration")
@@ -626,14 +649,13 @@ def render_build_mode():
             ```
             → Use `cluster_by='y'` + `cluster_select='lowest'` to pick value
 
-            **Example 3: Value between labels**
+            **Example 3: Value below label**
             ```
-            Zone may capture varying combinations:
-            - "Endorsements" + "NONE"
-            - "NONE" alone
-            - "NONE" + "Restrictions"
+            Zone captures:
+            - "LIEU DE NAISSANCE" (label)
+            - "CREIL" (city value)
             ```
-            → Use `cluster_by='y'` + `cluster_select='center'` to always pick value closest to zone center
+            → Use `cluster_by='y'` + `cluster_select='below_label'` + `labels=['lieu de naissance', 'place of birth']` to pick value below detected label
 
             **Example 4: Multiple columns**
             ```
@@ -678,21 +700,29 @@ def render_build_mode():
                     st.caption("📍 X-axis: Groups words in **same vertical column** (use for vertical layouts)")
 
             with col3:
+                # Check if labels are configured (for label-relative strategies)
+                has_labels = bool(zone_config.get('labels'))
+
                 # Smart options based on clustering axis
                 if cluster_by == 'y':
                     # Y-axis clustering: vertical position matters (top/bottom)
-                    select_options = ['lowest', 'highest', 'center', 'largest']
+                    absolute_options = ['lowest', 'highest']
+                    relative_options = ['below_label', 'above_label']
                     default_strategy = 'lowest'
-                    help_text = "Lowest=bottom, Highest=top, Center=closest to zone center, Largest=most words"
+                    help_text = "Absolute: Lowest=bottom, Highest=top | Relative: Below/Above label cluster"
                 else:  # cluster_by == 'x'
                     # X-axis clustering: horizontal position matters (left/right)
-                    select_options = ['leftmost', 'rightmost', 'center', 'largest']
+                    absolute_options = ['leftmost', 'rightmost']
+                    relative_options = ['right_of_label', 'left_of_label']
                     default_strategy = 'rightmost'
-                    help_text = "Leftmost=left, Rightmost=right, Center=closest to zone center, Largest=most words"
+                    help_text = "Absolute: Leftmost=left, Rightmost=right | Relative: Right/Left of label"
+
+                # Combine options with separator
+                select_options = absolute_options + ['---'] + relative_options
 
                 # Get current value, fallback to default if invalid for current axis
                 current_select = zone_config.get('cluster_select', default_strategy)
-                if current_select not in select_options:
+                if current_select not in select_options or current_select == '---':
                     current_select = default_strategy
 
                 cluster_select = st.selectbox(
@@ -700,9 +730,19 @@ def render_build_mode():
                     options=select_options,
                     index=select_options.index(current_select),
                     key=f"cluster_select_{st.session_state.current_field}",
-                    help=help_text
+                    help=help_text,
+                    format_func=lambda x: x.replace('_', ' ').title() if x != '---' else '─────────────'
                 )
+
+                # Don't allow separator to be selected
+                if cluster_select == '---':
+                    cluster_select = default_strategy
+
                 zone_config['cluster_select'] = cluster_select
+
+                # Show warning if relative strategy but no labels
+                if cluster_select in relative_options and not has_labels:
+                    st.warning("⚠️ Relative positioning requires labels. Configure 'Expected Labels' below.")
 
             # Tolerance configuration
             st.markdown("**Cluster Tolerance**")
@@ -742,44 +782,61 @@ def render_build_mode():
                     zone_config['cluster_tolerance'] = cluster_tolerance
 
             # Label patterns input (optional, for advanced filtering)
-            st.markdown("**Label Patterns** (Optional)")
-            label_patterns_input = st.text_area(
-                "Regex patterns to filter labels",
-                value='\n'.join(zone_config.get('label_patterns', [])) if zone_config.get('label_patterns') else '',
-                placeholder="e.g., ^(sex|dob|ln)$\nOne pattern per line",
-                height=80,
-                key=f"label_patterns_{st.session_state.current_field}",
-                help="Template-specific patterns to identify and remove label words (one per line)"
+            st.markdown("**Expected Labels** (Optional)")
+
+            # Format current labels as Python list string
+            current_labels = zone_config.get('labels', [])
+            if current_labels:
+                # Format as: ['place of birth', 'lieu de naissance']
+                formatted_value = str(current_labels)
+            else:
+                formatted_value = ''
+
+            labels_input = st.text_input(
+                "Labels",
+                value=formatted_value,
+                placeholder="['place of birth', 'lieu de naissance']",
+                key=f"labels_{st.session_state.current_field}",
+                help="List of expected label texts for fuzzy matching (handles OCR errors)"
             )
 
-            # Parse label patterns (one per line)
-            if label_patterns_input.strip():
-                label_patterns = [line.strip() for line in label_patterns_input.strip().split('\n') if line.strip()]
-                zone_config['label_patterns'] = label_patterns
+            # Parse labels (Python list format)
+            if labels_input.strip():
+                try:
+                    import ast
+                    parsed = ast.literal_eval(labels_input)
+                    if isinstance(parsed, list):
+                        zone_config['labels'] = [str(label).strip() for label in parsed if label]
+                    else:
+                        st.error("Invalid format. Use: ['label1', 'label2']")
+                        zone_config.pop('labels', None)
+                except:
+                    st.error("Invalid format. Use: ['label1', 'label2']")
+                    zone_config.pop('labels', None)
             else:
-                zone_config.pop('label_patterns', None)
+                zone_config.pop('labels', None)
 
             st.divider()
 
             # Show helpful info based on strategy and axis
             if cluster_by == 'y':
                 if cluster_select == 'lowest':
-                    st.info("💡 **Lowest** = Bottom cluster (e.g., value below label)\n\nExample: Label on top, value below")
+                    st.info("💡 **Lowest** = Bottom cluster (absolute positioning)\n\nExample: Label on top, value below")
                 elif cluster_select == 'highest':
-                    st.info("💡 **Highest** = Top cluster (e.g., value above label)\n\nExample: Value on top, label below")
-                elif cluster_select == 'center':
-                    st.info("💡 **Center** = Cluster closest to zone center\n\nExample: Zone center Y=0.450\n- 'Endorsements' (Y=0.435) + 'NONE' (Y=0.472) → picks 'NONE' (closer to center)\n- Handles varying zone captures automatically")
-                else:  # largest
-                    st.info("💡 **Largest** = Cluster with most words\n\nExample: Multi-word name vs single-word label")
+                    st.info("💡 **Highest** = Top cluster (absolute positioning)\n\nExample: Value on top, label below")
+                elif cluster_select == 'below_label':
+                    st.info("💡 **Below Label** = First cluster below detected label\n\nExample: Label cluster 'LIEU DE NAISSANCE' detected → picks next cluster below\n\n⚠️ Requires 'Expected Labels' to be configured")
+                elif cluster_select == 'above_label':
+                    st.info("💡 **Above Label** = First cluster above detected label\n\nExample: Label cluster detected → picks next cluster above\n\n⚠️ Requires 'Expected Labels' to be configured")
             else:  # cluster_by == 'x'
                 if cluster_select == 'rightmost':
-                    st.info("💡 **Rightmost** = Right cluster\n\nExample: Multiple columns → picks rightmost one")
+                    st.info("💡 **Rightmost** = Right cluster (absolute positioning)\n\nExample: Multiple columns → picks rightmost one")
                 elif cluster_select == 'leftmost':
-                    st.info("💡 **Leftmost** = Left cluster\n\nExample: Multiple columns → picks leftmost one")
-                elif cluster_select == 'middle':
-                    st.info("💡 **Middle** = Center cluster (e.g., middle column)\n\nExample: Left column, center column, right column → picks center")
-                else:  # largest
-                    st.info("💡 **Largest** = Cluster with most words\n\nExample: Multi-word value vs single-word label")
+                    st.info("💡 **Leftmost** = Left cluster (absolute positioning)\n\nExample: Multiple columns → picks leftmost one")
+                elif cluster_select == 'right_of_label':
+                    st.info("💡 **Right Of Label** = First cluster to the right of detected label\n\nExample: Label cluster detected → picks next cluster to the right\n\n⚠️ Requires 'Expected Labels' to be configured")
+                elif cluster_select == 'left_of_label':
+                    st.info("💡 **Left Of Label** = First cluster to the left of detected label\n\nExample: Label cluster detected → picks next cluster to the left\n\n⚠️ Requires 'Expected Labels' to be configured")
         else:
             # Remove clustering config if disabled
             zone_config.pop('cluster_by', None)
@@ -1287,7 +1344,8 @@ def render_zone_extraction_section(zone_config, field_name: str = None):
                 from zone_builder.zone_operations import get_consensus_from_models
                 normalized_text, vote_count, total_models = get_consensus_from_models(
                     model_results_normalized,
-                    field_name
+                    field_name,
+                    zone_config.get('tie_break_prefer')
                 )
                 consensus_text = normalized_text  # For display purposes
             else:
@@ -1412,7 +1470,8 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
                     from zone_builder.zone_operations import get_consensus_from_models
                     normalized_text, vote_count, total_models = get_consensus_from_models(
                         model_results_normalized,
-                        field_name
+                        field_name,
+                        zone_config.get('tie_break_prefer')
                     )
                     consensus_text = normalized_text  # For display purposes
                 else:
@@ -1563,7 +1622,8 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
                     from zone_builder.zone_operations import get_consensus_from_models
                     consensus_match, vote_count, total_models = get_consensus_from_models(
                         model_results_normalized,
-                        field_name
+                        field_name,
+                        zone_config.get('tie_break_prefer')
                     )
                     consensus_text = consensus_match  # For display purposes
                 else:
@@ -1852,7 +1912,8 @@ def process_test_images_and_extract(test_files, api_url):
                             from zone_builder.zone_operations import get_consensus_from_models
                             zone_normalized_text, zone_vote_count, zone_total_models = get_consensus_from_models(
                                 zone_model_results_normalized,
-                                field_name
+                                field_name,
+                                field_result.get('zone_config', {}).get('tie_break_prefer')
                             )
                             zone_consensus_text = zone_normalized_text  # For display purposes
                         else:
@@ -1961,7 +2022,8 @@ def process_test_images_and_extract(test_files, api_url):
                                     from zone_builder.zone_operations import get_consensus_from_models
                                     pattern_normalized_text, pattern_vote_count, pattern_total_models = get_consensus_from_models(
                                         pattern_model_results_normalized,
-                                        field_name
+                                        field_name,
+                                        field_result.get('zone_config', {}).get('tie_break_prefer')
                                     )
                                     pattern_consensus_text = pattern_normalized_text  # For display purposes
                                 else:
