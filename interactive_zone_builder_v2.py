@@ -24,7 +24,7 @@ from zone_builder.field_formats import (
     auto_detect_format
 )
 from zone_builder.exporters import (
-    export_to_json, export_to_python, preview_zone_status
+    export_to_python, preview_zone_status
 )
 from zone_builder.zone_operations import (
     calculate_aggregate_zone, extract_from_zone, extract_from_zone_multimodel,
@@ -744,6 +744,22 @@ def render_build_mode():
                 if cluster_select in relative_options and not has_labels:
                     st.warning("⚠️ Relative positioning requires labels. Configure 'Expected Labels' below.")
 
+            # Cluster count (how many clusters to select)
+            st.markdown("**Cluster Count**")
+            col_count1, col_count2 = st.columns([2, 3])
+            with col_count1:
+                cluster_count = st.number_input(
+                    "Number of clusters",
+                    min_value=1,
+                    max_value=10,
+                    value=zone_config.get('cluster_count', 1),
+                    key=f"cluster_count_{st.session_state.current_field}",
+                    help="Select multiple consecutive clusters (e.g., for multi-line names)"
+                )
+                zone_config['cluster_count'] = cluster_count
+            with col_count2:
+                st.caption("💡 Use for multi-line values (e.g., 'MARTIN DE LA CRUZ' split across 2 lines)")
+
             # Tolerance configuration
             st.markdown("**Cluster Tolerance**")
 
@@ -1399,6 +1415,20 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
             else:
                 st.info("ℹ️ Pattern without capturing group - extracts full match + cleanup_pattern")
 
+    # Clustering toggle for pattern-based extraction
+    has_clustering = bool(zone_config.get('cluster_by'))
+    if has_clustering:
+        pattern_use_clustering = st.checkbox(
+            "Use clustering for pattern extraction",
+            value=zone_config.get('pattern_use_clustering', True),
+            key=f"pattern_use_clustering_{field_name}",
+            help="Apply clustering BEFORE pattern extraction to filter out labels. Disable to apply pattern on full zone text."
+        )
+        zone_config['pattern_use_clustering'] = pattern_use_clustering
+    else:
+        # No clustering configured, remove flag if present
+        zone_config.pop('pattern_use_clustering', None)
+
     # Cleanup toggle
     apply_cleanup = st.checkbox(
         "Apply cleanup pattern to extracted value",
@@ -1407,17 +1437,19 @@ def render_pattern_extraction_section(zone_config, field_name: str = None):
         help="Apply cleanup pattern to the value extracted by consensus pattern (e.g., remove remaining labels)"
     )
 
-    # Prepare expanded zone config WITHOUT cleanup and WITHOUT clustering
-    # For pattern-based: clustering is applied AFTER pattern extraction (not before)
-    # Pattern needs ALL zone text to match against (clustering filters it after)
+    # Prepare expanded zone config WITHOUT cleanup
     expanded_zone_config = zone_config.copy()
     expanded_zone_config['y_range'] = expanded_y
     expanded_zone_config['x_range'] = expanded_x
     expanded_zone_config['cleanup_pattern'] = ''  # Cleanup happens AFTER pattern extraction
-    # Remove clustering from expanded zone (will be applied AFTER pattern extraction)
-    expanded_zone_config.pop('cluster_by', None)
-    expanded_zone_config.pop('cluster_select', None)
-    expanded_zone_config.pop('cluster_tolerance', None)
+
+    # Handle clustering based on pattern_use_clustering flag
+    if not zone_config.get('pattern_use_clustering', True):
+        # Remove clustering from expanded zone if user disabled it for pattern extraction
+        expanded_zone_config.pop('cluster_by', None)
+        expanded_zone_config.pop('cluster_select', None)
+        expanded_zone_config.pop('cluster_tolerance', None)
+        expanded_zone_config.pop('labels', None)
 
     # Decide what to show based on whether pattern is entered
     if not consensus_pattern:
@@ -1808,37 +1840,18 @@ def render_export_mode():
             f"Document Type: `{metadata.get('document_type', 'N/A')}`")
 
     # Export section
-    st.markdown("#### 💾 Export Options")
-    
-    export_format = st.radio(
-        "Export Format",
-        ["JSON", "Python Template"],
-        horizontal=True
+    st.markdown("#### 💾 Export Template")
+
+    python_code = export_to_python(st.session_state.zones, metadata)
+    st.code(python_code, language="python", line_numbers=True)
+
+    st.download_button(
+        "📥 Download Python Template",
+        data=python_code,
+        file_name=f"{metadata['template_name']}.py",
+        mime="text/plain",
+        use_container_width=True
     )
-    
-    if export_format == "JSON":
-        zones_json = export_to_json(st.session_state.zones)
-        st.code(zones_json, language="json", line_numbers=True)
-        
-        st.download_button(
-            "📥 Download JSON",
-            data=zones_json,
-            file_name=f"{metadata['template_name']}.json",
-            mime="application/json",
-            use_container_width=True
-        )
-    
-    else:  # Python Template
-        python_code = export_to_python(st.session_state.zones, metadata)
-        st.code(python_code, language="python", line_numbers=True)
-        
-        st.download_button(
-            "📥 Download Python Template",
-            data=python_code,
-            file_name=f"{metadata['template_name']}.py",
-            mime="text/plain",
-            use_container_width=True
-        )
 
 
 def process_test_images_and_extract(test_files, api_url):

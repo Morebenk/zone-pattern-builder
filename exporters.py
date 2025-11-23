@@ -68,6 +68,12 @@ def clean_zone_config(zone_config: Dict[str, Any]) -> Dict[str, Any]:
         clean['cluster_select'] = zone_config['cluster_select']
     if zone_config.get('cluster_tolerance'):
         clean['cluster_tolerance'] = zone_config['cluster_tolerance']
+    # Cluster count (default 1, only export if > 1)
+    if zone_config.get('cluster_count', 1) > 1:
+        clean['cluster_count'] = zone_config['cluster_count']
+    # Pattern clustering flag (default True, only export if explicitly set to False)
+    if zone_config.get('pattern_use_clustering') is False:
+        clean['pattern_use_clustering'] = False
 
     # Tie-breaking strategy for character voting
     if zone_config.get('tie_break_prefer'):

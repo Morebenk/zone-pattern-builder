@@ -520,6 +520,13 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
                 match = re.search(pattern, field_config_text)
                 if match:
                     zone_config[key] = float(match.group(1))
+
+            # Parse integer values
+            for key in ['cluster_count']:
+                pattern = rf"'{key}':\s*([0-9]+)"
+                match = re.search(pattern, field_config_text)
+                if match:
+                    zone_config[key] = int(match.group(1))
             
             # Parse regex patterns (with r"" or r'' prefix, including multiline)
             for key in ['pattern', 'cleanup_pattern', 'consensus_extract']:
@@ -540,7 +547,7 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
                     zone_config[key] = match.group(1)
 
             # Parse boolean values
-            for key in ['uppercase', 'strict_validation', 'validate_alphabetic', 'allow_commas', 'allow_digits']:
+            for key in ['uppercase', 'strict_validation', 'validate_alphabetic', 'allow_commas', 'allow_digits', 'pattern_use_clustering']:
                 if re.search(rf"'{key}':\s*True", field_config_text):
                     zone_config[key] = True
                 elif re.search(rf"'{key}':\s*False", field_config_text):
@@ -617,7 +624,14 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
                     match = re.search(pattern, field_config_text)
                     if match:
                         zone_config[key] = float(match.group(1))
-                
+
+                # Parse integer values
+                for key in ['cluster_count']:
+                    pattern = rf"'{key}':\s*([0-9]+)"
+                    match = re.search(pattern, field_config_text)
+                    if match:
+                        zone_config[key] = int(match.group(1))
+
                 # Parse regex patterns (with r"" or r'' prefix, including multiline)
                 for key in ['pattern', 'cleanup_pattern', 'consensus_extract']:
                     # Try triple quotes first
@@ -637,10 +651,12 @@ def load_template_file(file_content: str) -> Optional[Dict[str, Any]]:
                         zone_config[key] = match.group(1)
 
                 # Parse boolean values
-                for key in ['uppercase', 'strict_validation', 'validate_alphabetic', 'allow_commas', 'allow_digits']:
+                for key in ['uppercase', 'strict_validation', 'validate_alphabetic', 'allow_commas', 'allow_digits', 'pattern_use_clustering']:
                     pattern = rf"'{key}':\s*True"
                     if re.search(pattern, field_config_text):
                         zone_config[key] = True
+                    elif re.search(rf"'{key}':\s*False", field_config_text):
+                        zone_config[key] = False
 
                 # Parse label_patterns list (legacy, for backwards compatibility)
                 label_patterns_match = re.search(r"'label_patterns':\s*\[(.*?)\]", field_config_text, re.DOTALL)
